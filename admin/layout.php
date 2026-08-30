@@ -81,6 +81,7 @@ body{font-family:'Inter',sans-serif;background:#080c12;color:#eef2f8;min-width:1
   <a href="<?= $bp ?>/admin/"                     <?= $pg==='dash'   ?'class="on"':'' ?>><span>🏠</span> Dashboard</a>
   <a href="<?= $bp ?>/admin/fetch.php"            <?= $pg==='fetch'  ?'class="on"':'' ?>><span>⚡</span> Fetch Latest</a>
   <a href="<?= $bp ?>/admin/auto_sync.php"             <?= $pg==='auto_sync'   ?'class="on"':'' ?>><span>🔄</span> Auto Sync</a>
+  <a href="<?= $bp ?>/admin/scraper.php"          <?= $pg==='scraper' ?'class="on"':'' ?>><span>🛰️</span> Scraper Centre</a>
   <a href="<?= $bp ?>/admin/cron.php"             <?= $pg==='cron'   ?'class="on"':'' ?>><span>⏱️</span> Weekly Update</a>
   <div class="sb-sec">Data</div>
   <a href="<?= $bp ?>/admin/edit_episode.php"     <?= $pg==='editep' ?'class="on"':'' ?>><span>✏️</span> Edit Episode</a>
