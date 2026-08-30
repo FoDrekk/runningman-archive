@@ -1,5 +1,0 @@
-# Host-specific scraping configuration — API keys and local tuning.
-# config/scraping.php merges this over the defaults when present, so it
-# is where a TMDB key belongs. Never commit it.
-# Start from config/scraping.local.example.php.
-config/scraping.local.php

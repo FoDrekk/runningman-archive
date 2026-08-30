@@ -14,7 +14,6 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/functions.php';
-require_once __DIR__ . '/../includes/scraping/bootstrap.php';
 adminCheck();
 
 $db = getDB();
@@ -306,104 +305,6 @@ require_once __DIR__ . '/layout.php';
     <span id="saveStatus" style="font-size:.82rem;color:rgba(255,255,255,.4)"></span>
   </div>
 </form>
-
-<!-- ── Where this episode's data came from ─────────────────────
-     Field-level provenance: which source won each value, who agreed,
-     how confident the engine was, and what disagreed. This is the
-     answer to "why does this episode say that?" — and the place a
-     wrong value gets traced back to the source that supplied it. -->
-<?php
-$prov      = new RmProvenance();
-$provData  = $prov->forEpisode((int)$ep['episode_number']);
-$provReady = rmScrapingTablesExist();
-$confColour = ['high'=>'#4ade80','medium'=>'#facc15','low'=>'#fb923c','conflict'=>'#f87171'];
-?>
-<div class="ap">
-  <div class="sh">Data Provenance</div>
-  <?php if (!$provReady): ?>
-    <p style="font-size:.78rem;color:rgba(255,255,255,.35)">
-      Provenance tracking is not installed yet. Install the engine tables from
-      <a href="<?= bp() ?>/admin/scraper.php">Scraper Control Centre</a> to record where each value came from.
-    </p>
-  <?php elseif (!$provData['fields'] && !$provData['sources']): ?>
-    <p style="font-size:.78rem;color:rgba(255,255,255,.35)">
-      No scrape has been recorded for this episode yet — its data predates provenance tracking, or was entered by hand.
-      Run a sync from the <a href="<?= bp() ?>/admin/scraper.php">Scraper Control Centre</a> to populate it.
-    </p>
-  <?php else: ?>
-    <?php if ($provData['fields']): ?>
-    <table class="atable" style="margin-bottom:1rem">
-      <thead><tr><th style="width:130px">Field</th><th>Source</th><th>Confidence</th><th>Agreed by</th><th>Disagreement</th><th>Updated</th></tr></thead>
-      <tbody>
-      <?php foreach ($provData['fields'] as $f): ?>
-        <tr>
-          <td style="font-weight:700"><?= h((string)$f['field_name']) ?></td>
-          <td>
-            <?php if (!empty($f['source_url'])): ?>
-              <a href="<?= h((string)$f['source_url']) ?>" target="_blank" rel="noopener"><?= h((string)$f['source_name']) ?></a>
-            <?php else: ?><?= h((string)$f['source_name']) ?><?php endif; ?>
-          </td>
-          <td style="color:<?= $confColour[(string)$f['confidence']] ?? 'rgba(255,255,255,.4)' ?>;font-weight:700">
-            <?= h(strtoupper((string)$f['confidence'])) ?>
-          </td>
-          <td style="font-size:.75rem;color:rgba(255,255,255,.45)"><?= h((string)($f['agreeing_sources'] ?: '—')) ?></td>
-          <td style="font-size:.72rem;color:<?= !empty($f['conflicting']) ? '#fca5a5' : 'rgba(255,255,255,.3)' ?>;max-width:260px">
-            <?= h((string)($f['conflicting'] ?: '—')) ?>
-          </td>
-          <td style="font-size:.72rem;color:rgba(255,255,255,.3)"><?= h(substr((string)$f['updated_at'], 0, 16)) ?></td>
-        </tr>
-      <?php endforeach; ?>
-      </tbody>
-    </table>
-    <?php endif; ?>
-
-    <?php if ($provData['sources']): ?>
-    <div class="sh" style="margin-top:.4rem">Sources consulted</div>
-    <table class="atable">
-      <thead><tr><th style="width:130px">Source</th><th>Result</th><th>Fields provided</th><th>Parser</th><th>Fetched</th></tr></thead>
-      <tbody>
-      <?php foreach ($provData['sources'] as $sRow):
-        $st = (string)$sRow['status'];
-        $col = $st === 'ok' ? '#86efac' : (in_array($st, ['empty','missing_episode','not_applicable','disabled'], true) ? 'rgba(255,255,255,.35)' : ($st === 'parser_warning' ? '#fcd34d' : '#fca5a5')); ?>
-        <tr>
-          <td><?php if (!empty($sRow['source_url'])): ?>
-            <a href="<?= h((string)$sRow['source_url']) ?>" target="_blank" rel="noopener"><?= h((string)$sRow['source_name']) ?></a>
-          <?php else: ?><?= h((string)$sRow['source_name']) ?><?php endif; ?></td>
-          <td style="color:<?= $col ?>"><?= h(str_replace('_', ' ', $st)) ?><?= $sRow['http_status'] ? ' <span style="opacity:.6">(HTTP ' . (int)$sRow['http_status'] . ')</span>' : '' ?></td>
-          <td style="font-size:.74rem;color:rgba(255,255,255,.45)"><?= h((string)($sRow['fields_provided'] ?: '—')) ?></td>
-          <td style="font-size:.72rem;color:rgba(255,255,255,.3)"><?= h((string)($sRow['parser_version'] ?: '—')) ?></td>
-          <td style="font-size:.72rem;color:rgba(255,255,255,.3)"><?= h(substr((string)$sRow['fetched_at'], 0, 16)) ?><?= $sRow['duration_ms'] ? ' · ' . (int)$sRow['duration_ms'] . 'ms' : '' ?></td>
-        </tr>
-      <?php endforeach; ?>
-      </tbody>
-    </table>
-    <?php endif; ?>
-
-    <?php if ($provData['alt_titles']): ?>
-    <div style="margin-top:.9rem;font-size:.8rem;color:rgba(255,255,255,.5)">
-      <strong style="color:rgba(41,171,226,.7)">Alternate titles kept:</strong>
-      <?= h(implode(' · ', array_map(fn($a) => $a['title'] . ' (' . $a['lang'] . ')', $provData['alt_titles']))) ?>
-    </div>
-    <?php endif; ?>
-
-    <?php if ($provData['changes']): ?>
-    <div class="sh" style="margin-top:1.1rem">Change History</div>
-    <div style="background:#06090f;border-radius:8px;padding:.8rem;font-size:.73rem;font-family:ui-monospace,monospace;line-height:1.9;max-height:260px;overflow-y:auto">
-      <?php foreach ($provData['changes'] as $c):
-        $applied = !empty($c['applied']); ?>
-        <div style="color:<?= $c['change_type'] === 'rejected' ? '#fca5a5' : ($applied ? '#86efac' : 'rgba(255,255,255,.35)') ?>">
-          [<?= h(substr((string)$c['created_at'], 5, 11)) ?>]
-          <?= h((string)$c['field_name']) ?>
-          <?= h(str_replace('_', ' ', (string)$c['change_type'])) ?>
-          <?= $applied ? '' : '(not applied)' ?>
-          <?= $c['source_name'] ? ' via ' . h((string)$c['source_name']) : '' ?>
-          <?= $c['reason'] ? ' — ' . h(mb_substr((string)$c['reason'], 0, 100)) : '' ?>
-        </div>
-      <?php endforeach; ?>
-    </div>
-    <?php endif; ?>
-  <?php endif; ?>
-</div>
 
 <?php endif; ?>
 

@@ -65,74 +65,137 @@ if (isset($_GET['a']) && $_GET['a'] === 'progress') {
 }
 
 // ── AJAX: sync one episode ────────────────────────────────────
-// Now delegated to the scraping engine, so a bulk sync gains everything
-// a single episode gets in the control centre: all sources consulted,
-// per-FIELD priority, validation, confidence, provenance, and the
-// data-safety guards that refuse to replace a good value with an empty
-// or suspicious one. The JSON keys the front end already reads
-// (ok/title/guests/source/msg) are unchanged.
 if (isset($_GET['a']) && $_GET['a']==='sync' && isset($_GET['ep'])) {
     header('Content-Type: application/json');
-    set_time_limit(60);
+    set_time_limit(30);
     $startMs = microtime(true);
     $n = (int)$_GET['ep'];
+    $d = rmScrapeEpisode($n);
+
+    if (!$d) {
+        logActivity('sync', $n, 'failed', 'No data from any source', (int)((microtime(true)-$startMs)*1000));
+        echo json_encode(['ok'=>false,'ep'=>$n,'msg'=>'No data']);
+        exit;
+    }
 
     try {
-        $engine = new RmScrapingEngine();
-        $r = $engine->syncEpisode($n, [
-            'dry_run'      => !empty($_GET['dry']),
-            'all_fields'   => !empty($_GET['all']),
-            'bypass_cache' => !empty($_GET['fresh']),
-        ]);
-        $durMs = (int)((microtime(true) - $startMs) * 1000);
+        $updates=[]; $params=[];
+        $padded = str_pad($n,3,'0',STR_PAD_LEFT);
 
-        if (!empty($r['failed'])) {
-            logActivity('sync', $n, 'failed', (string)($r['reason'] ?? 'No data from any source'), $durMs);
-            echo json_encode(['ok'=>false,'ep'=>$n,'msg'=>$r['reason'] ?? 'No data']);
-            exit;
+        // Title — only overwrite if new is better (has descriptor)
+        if (!empty($d['title']) && !preg_match('/Episodes?\s*[-–]\s*Page\s*\d+/i', $d['title'])) {
+            $newTitle = $d['title'];
+            if (!preg_match('/^Episode\s*#\d+/i', $newTitle)) {
+                $desc = preg_replace('/^Running\s*Man\s*[—\-]?\s*(Episode\s*#?\d+\s*[-–]?\s*)?/i','', $newTitle);
+                $newTitle = strlen(trim($desc)) > 4 ? "Episode #$padded - ".trim($desc) : "Episode #$padded";
+            }
+            if (str_contains($newTitle, ' - ')) {
+                $exTitle = $db->prepare("SELECT title FROM episodes WHERE episode_number=?");
+                $exTitle->execute([$n]); $existingTitle = (string)$exTitle->fetchColumn(); // FIXED: was $epNum (undefined)
+                if (!str_contains($existingTitle, ' - ') || strlen($newTitle) > strlen($existingTitle)) {
+                    $updates[] = 'title=?'; $params[] = $newTitle;
+                }
+            }
+        }
+        if (!empty($d['synopsis']))   { $updates[]='synopsis=?';    $params[]=$d['synopsis']; }
+        if (!empty($d['mission']))    { $updates[]='main_mission=?';$params[]=$d['mission']; }
+        if (rmTeamsResultsColumnsExist($db)) {
+            if (!empty($d['teams']))   { $updates[]='teams=?';   $params[]=$d['teams']; }
+            if (!empty($d['results'])) { $updates[]='results=?'; $params[]=$d['results']; }
+        }
+        if (!empty($d['air_date']) && $d['air_date'] > '2009-01-01') { $updates[]='air_date=?'; $params[]=$d['air_date']; }
+
+        // Location — look up an existing row by name first (case-insensitive),
+        // create one if it doesn't exist yet. Best-effort: country/overseas
+        // flag aren't known from this scrape, so a brand-new location just
+        // gets the bare name; Admin can enrich it later if needed.
+        if (!empty($d['location'])) {
+            $locName = trim($d['location']);
+            $lf = $db->prepare("SELECT location_id FROM locations WHERE name=? LIMIT 1");
+            $lf->execute([$locName]);
+            $locId = $lf->fetchColumn();
+            if (!$locId) {
+                $db->prepare("INSERT INTO locations (name) VALUES (?)")->execute([$locName]);
+                $locId = (int)$db->lastInsertId();
+            }
+            $updates[] = 'location_id=?'; $params[] = (int)$locId;
         }
 
-        $resolved = (array)($r['resolved'] ?? []);
-        $applied  = (int)($r['summary']['total_applied'] ?? 0);
-        $title    = $resolved['title']['value'] ?? ($r['existing']['title'] ?? null);
-        $location = $resolved['location']['value'] ?? null;
-
-        // Sources that actually contributed a winning value.
-        $contributors = [];
-        foreach ($resolved as $f) foreach ((array)($f['sources'] ?? []) as $s) $contributors[$s] = true;
-
-        $changeLines = array_map([RmDiffEngine::class, 'renderLine'],
-            array_values(array_filter((array)($r['changes'] ?? []), fn($c) => $c['type'] !== 'unchanged')));
-
-        if (!empty($r['skipped'])) {
-            logActivity('sync', $n, 'skipped', (string)($r['reason'] ?? 'Already complete'), $durMs);
-        } else {
-            logActivity('sync', $n, 'success',
-                ($title ?? '') . ' [' . (implode('+', array_keys($contributors)) ?: 'none') . ']'
-                . ($applied ? " · $applied field(s)" : ' · no changes needed'), $durMs);
+        if (!empty($updates)) {
+            $updates[]='verification_required=0';
+            $params[]=$n;
+            $db->prepare("UPDATE episodes SET ".implode(',',$updates)." WHERE episode_number=?")->execute($params);
         }
 
-        echo json_encode([
-            'ok'         => true,
-            'ep'         => $n,
-            'source'     => implode('+', array_keys($contributors)) ?: 'none',
-            'title'      => $title,
-            'has_syn'    => !empty($resolved['synopsis']['value']) || !empty($r['existing']['synopsis']),
-            'guests'     => count((array)($resolved['guests']['value'] ?? [])),
-            'tags'       => count((array)($resolved['tags']['value'] ?? [])),
-            'thumb'      => !empty($r['thumbnail']['ok']),
-            'location'   => is_array($location) ? ($location['name'] ?? null) : $location,
-            // Additive keys — the existing UI ignores them; newer views
-            // use them for change and confidence display.
-            'skipped'    => !empty($r['skipped']),
-            'is_new'     => !empty($r['is_new']),
-            'applied'    => $applied,
-            'changes'    => $changeLines,
-            'warnings'   => array_column((array)($r['warnings'] ?? []), 'message'),
-            'confidence' => array_map(fn($x) => $x['confidence'] ?? null, $resolved),
-            'ms'         => $durMs,
-        ]);
-    } catch (Throwable $e) {
+        // Auto-summary fallback — only when there's still no real synopsis
+        // AND we have enough scraped material to make one worthwhile.
+        // Stored in the same synopsis column but only ever written when
+        // synopsis is genuinely empty, so a real synopsis arriving later
+        // (re-sync) always takes priority and overwrites it above.
+        //
+        // Defensive: teams/results columns only exist after running
+        // database/add_teams_results.sql. If that migration hasn't been
+        // applied yet, selecting those columns throws — without this
+        // try/catch, EVERY sync where synopsis is empty would silently
+        // fail at this step and never reach the fallback at all.
+        // NOTE: we intentionally do NOT write a synthesized summary into
+        // the synopsis column here. The synopsis column should only ever
+        // hold a REAL scraped description, for two reasons:
+        //   1. episode.php already calls generateEpisodeSummary() live at
+        //      display time (excluding fields it shows separately), so an
+        //      episode with no real synopsis still shows a sensible,
+        //      non-redundant summary without us persisting anything.
+        //   2. Persisting a synthesized summary made the "incomplete"
+        //      detector (synopsis IS NULL OR '') treat the episode as
+        //      complete, permanently hiding genuinely description-less
+        //      episodes from re-sync — and it stored text that just
+        //      duplicated the Main Mission/Teams/Result rows (EP807).
+        // Leaving synopsis empty keeps the data honest and re-syncable.
+
+        // Tags
+        $tagCount = 0;
+        if (!empty($d['tags'])) {
+            $epStmt2=$db->prepare("SELECT episode_id FROM episodes WHERE episode_number=?"); $epStmt2->execute([$n]); $epId2=(int)$epStmt2->fetchColumn();
+            if ($epId2) foreach ($d['tags'] as $tagName) {
+                $tagName = trim($tagName);
+                if ($tagName === '') continue;
+                $tg=$db->prepare("SELECT tag_id FROM tags WHERE name=?"); $tg->execute([$tagName]); $tgid=$tg->fetchColumn();
+                if (!$tgid){$db->prepare("INSERT INTO tags (name) VALUES (?)")->execute([$tagName]);$tgid=(int)$db->lastInsertId();}
+                $db->prepare("INSERT IGNORE INTO episode_tags (episode_id,tag_id) VALUES (?,?)")->execute([$epId2,$tgid]);
+                $tagCount++;
+            }
+        }
+
+        // Guests
+        $guestCount = 0;
+        if (!empty($d['guests'])) {
+            $epStmt=$db->prepare("SELECT episode_id FROM episodes WHERE episode_number=?"); $epStmt->execute([$n]); $epId=(int)$epStmt->fetchColumn();
+            if ($epId) foreach ($d['guests'] as $gn) {
+                $g=$db->prepare("SELECT guest_id FROM guests WHERE name_romanized=?"); $g->execute([$gn]); $gid=$g->fetchColumn();
+                if (!$gid){$db->prepare("INSERT INTO guests (name_romanized) VALUES (?)")->execute([$gn]);$gid=(int)$db->lastInsertId();}
+                $db->prepare("INSERT IGNORE INTO episode_guests (episode_id,guest_id) VALUES (?,?)")->execute([$epId,$gid]);
+                $guestCount++;
+            }
+        }
+
+        // Thumbnail if missing
+        $tCheck=$db->prepare("SELECT t.verified FROM episodes e LEFT JOIN thumbnails t ON t.thumbnail_id=e.thumbnail_id WHERE e.episode_number=?"); $tCheck->execute([$n]); $tv=$tCheck->fetchColumn();
+        $thumbSaved=false;
+        if (!$tv && !empty($d['image_url'])) {
+            $wp=rmDownloadThumb($d['image_url'],$n,rmYear($n));
+            if ($wp) {
+                $db->prepare("INSERT INTO thumbnails (episode_number,local_path,thumbnail_url,verified) VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE local_path=VALUES(local_path),verified=1")->execute([$n,$wp,$d['image_url']]);
+                $db->prepare("UPDATE episodes SET thumbnail_id=(SELECT thumbnail_id FROM thumbnails WHERE episode_number=? LIMIT 1) WHERE episode_number=?")->execute([$n,$n]);
+                $thumbSaved=true;
+            }
+        }
+        @unlink(sys_get_temp_dir().'/rm_stats.json');
+
+        $durMs = (int)((microtime(true)-$startMs)*1000);
+        logActivity('sync', $n, 'success', ($d['title']??'').' ['.$d['source'].']', $durMs);
+
+        echo json_encode(['ok'=>true,'ep'=>$n,'source'=>$d['source'],'title'=>$d['title']??null,'has_syn'=>!empty($d['synopsis']),'guests'=>$guestCount,'tags'=>$tagCount,'thumb'=>$thumbSaved,'location'=>$d['location']??null]);
+    } catch(Exception $e) {
         logActivity('sync', $n, 'failed', $e->getMessage(), (int)((microtime(true)-$startMs)*1000));
         echo json_encode(['ok'=>false,'ep'=>$n,'msg'=>$e->getMessage()]);
     }
