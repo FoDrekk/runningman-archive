@@ -251,7 +251,10 @@ class RmMissingData
                 $from = max(1, (int)($opt['from'] ?? 1));
                 $to   = max($from, (int)($opt['to'] ?? $from));
                 $eps  = range($from, min($to, $from + max(0, $limit) - 1));
-                return ['episodes' => $eps, 'fields' => [], 'label' => "EP$from–EP" . end($eps)];
+                // Concatenated, not interpolated: PHP 8 allows high bytes in
+                // identifiers, so "EP$from–EP" parses the en-dash as part of
+                // the variable name and silently yields an undefined variable.
+                return ['episodes' => $eps, 'fields' => [], 'label' => 'EP' . $from . '–EP' . end($eps)];
 
             case 'latest':
                 $latest = (int)($opt['latest'] ?? 0);

@@ -56,6 +56,7 @@ class RmHttpClient
     const CLASS_EMPTY        = 'empty_response';   // 200 with nothing usable in it
     const CLASS_REDIRECT     = 'redirect_loop';
     const CLASS_ROBOTS       = 'robots_denied';
+    const CLASS_PROXY        = 'proxy_blocked';      // a proxy/gateway refused the tunnel
     const CLASS_NO_CURL      = 'curl_missing';
     const CLASS_OTHER        = 'unknown_failure';
 
@@ -217,7 +218,8 @@ class RmHttpClient
 
         // Suppress repeats of permanent / blocking failures for a window.
         $negTtl = match ($lastClass) {
-            self::CLASS_BLOCKED, self::CLASS_RATE_LIMITED => (int)rmScrapeConfig('cache.ttl_blocked', 3600),
+            self::CLASS_BLOCKED, self::CLASS_RATE_LIMITED,
+            self::CLASS_PROXY                              => (int)rmScrapeConfig('cache.ttl_blocked', 3600),
             self::CLASS_NOT_FOUND                          => (int)rmScrapeConfig('cache.ttl_page', 21600),
             default                                        => (int)rmScrapeConfig('cache.ttl_negative', 600),
         };
@@ -244,14 +246,26 @@ class RmHttpClient
     }
 
     private function classifyCurl(int $errno, string $msg): array {
+        // A proxy refusing CONNECT surfaces under several errnos with the
+        // real cause only in the message, so match on that first.
+        if (stripos($msg, 'CONNECT tunnel failed') !== false
+            || stripos($msg, 'proxy CONNECT') !== false
+            || stripos($msg, 'Received HTTP code 403 from proxy') !== false) {
+            return [self::CLASS_PROXY,
+                'Blocked by a proxy or gateway before reaching the site (' . trim($msg) . ') — '
+                . 'the network is refusing the request, not the source'];
+        }
         return match ($errno) {
-            5, 6    => [self::CLASS_DNS, 'DNS resolution failed — host could not be resolved (no internet, DNS blocked, or domain gone)'],
+            5       => [self::CLASS_PROXY, 'Could not resolve the configured HTTP proxy — ' . $msg],
+            6       => [self::CLASS_DNS, 'DNS resolution failed — host could not be resolved (no internet, DNS blocked, or domain gone)'],
             7       => [self::CLASS_CONNECT, 'Connection refused — host unreachable or a firewall is blocking it'],
             28      => [self::CLASS_TIMEOUT, 'Request timed out — server too slow or packets dropped'],
             35, 58,
             59, 83  => [self::CLASS_SSL, 'TLS handshake failed — ' . $msg],
             51, 60  => [self::CLASS_SSL, 'SSL certificate verification failed — ' . $msg],
             47      => [self::CLASS_REDIRECT, 'Too many redirects — likely a redirect loop'],
+            56      => [self::CLASS_CONNECT, 'Connection broken while receiving data — ' . $msg],
+            97      => [self::CLASS_PROXY, 'Proxy handshake failed — ' . $msg],
             default => [self::CLASS_OTHER, "curl error $errno: $msg"],
         };
     }

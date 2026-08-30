@@ -35,11 +35,19 @@ function wikiClean(string $html): string {
 // Wikipedia article structure: "List of Running Man episodes (2024)".
 // Every fetch below MUST target a specific year.
 
+// Last transport-level failure from rmWikiFetchYearPage(), so the adapter
+// can report WHY the page was unavailable (DNS, proxy, 404, timeout…)
+// rather than collapsing every cause into "unknown failure".
+function rmWikiLastFetchFailure(): ?array {
+    return $GLOBALS['__rm_wiki_fetch_failure'] ?? null;
+}
+
 // ── Wikipedia: fetch & cache ONE YEAR'S episode page ───────────
 // Same contract as before (kept for admin/diagnostics.php), now
 // routed through the shared HTTP client + cache.
 function rmWikiFetchYearPage(int $year, bool $bypassCache = false): ?string {
     $http  = RmHttpClient::instance();
+    $GLOBALS['__rm_wiki_fetch_failure'] = null;
     $isCurrent = $year >= (int)date('Y');
     $ttl   = $isCurrent ? (int)rmScrapeConfig('cache.ttl_index', 1800)
                         : (int)rmScrapeConfig('cache.ttl_reference', 604800);
@@ -63,8 +71,11 @@ function rmWikiFetchYearPage(int $year, bool $bypassCache = false): ?string {
             'bypass_cache' => $bypassCache,
             'delay_ms'     => (int)rmScrapeConfig('sources.wikipedia.delay_ms', 600),
         ]);
-        if (!$res->ok || !is_array($data)) continue;
-        if (isset($data['error'])) continue;   // "missingtitle" etc — try next candidate
+        if (!$res->ok) {
+            $GLOBALS['__rm_wiki_fetch_failure'] = ['error' => $res->error, 'class' => $res->errorClass, 'http' => $res->status];
+            continue;
+        }
+        if (!is_array($data) || isset($data['error'])) continue;   // "missingtitle" etc — try next candidate
         $html = $data['parse']['text']['*'] ?? null;
         // A real year page with ~50 episode rows is always several KB.
         // Anything under 2000 chars is a stub/redirect, not real data.
@@ -462,14 +473,20 @@ class WikipediaScraper extends RmScraper
 
         if (!$all) {
             // Distinguish "couldn't reach Wikipedia" from "reached it and
-            // parsed nothing" — the second means our selectors are stale.
+            // parsed nothing". The second is the dangerous one: it means the
+            // page loaded fine and our selectors no longer match, which
+            // without this distinction would look exactly like an episode
+            // that simply has no data.
             $reachable = rmWikiFetchYearPage($year) !== null;
+            $failure   = rmWikiLastFetchFailure();
             return $this->emptyResult($url,
                 $reachable ? 'parser_warning' : 'fetch_failed',
                 $reachable
                     ? "Year page $year loaded but produced 0 episode rows — table structure may have changed"
-                    : (RmHttpClient::instance()->lastError() ?? 'Could not load the Wikipedia year page'),
-                ['_ms' => $ms, '_error_class' => $reachable ? 'parser_failure' : RmHttpClient::CLASS_OTHER]
+                    : ($failure['error'] ?? RmHttpClient::instance()->lastError() ?? 'Could not load the Wikipedia year page'),
+                ['_ms' => $ms,
+                 '_error_class' => $reachable ? 'parser_failure' : ($failure['class'] ?? RmHttpClient::CLASS_OTHER),
+                 '_http' => $failure['http'] ?? null]
             );
         }
 

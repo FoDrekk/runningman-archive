@@ -155,6 +155,33 @@ class RmScrapeRun
 
     public function logLines(): array { return $this->memoryLog; }
 
+    /**
+     * Log a line that belongs to no particular run — a standalone
+     * episode sync from the control centre or Auto Sync. Written with a
+     * NULL run_id so it still appears in the activity log without
+     * fabricating a run row per episode.
+     */
+    public static function note(string $event, string $message = '', array $ctx = []): void
+    {
+        $db = getDBSafe();
+        if ($db === null) return;
+        $level = (string)($ctx['level'] ?? 'info');
+        if (!in_array($level, ['debug','info','warning','error'], true)) $level = 'info';
+        try {
+            $db->prepare(
+                "INSERT INTO scrape_log (run_id, episode_number, source_name, level, event, message, duration_ms)
+                 VALUES (NULL,?,?,?,?,?,?)"
+            )->execute([
+                isset($ctx['episode']) ? (int)$ctx['episode'] : null,
+                isset($ctx['source']) ? mb_substr((string)$ctx['source'], 0, 40) : null,
+                $level,
+                mb_substr($event, 0, 60),
+                mb_substr(self::redact($message), 0, 500) ?: null,
+                isset($ctx['ms']) ? (int)$ctx['ms'] : null,
+            ]);
+        } catch (Throwable $e) { }
+    }
+
     // ── Static readers for Admin ─────────────────────────────────
     public static function recent(int $limit = 15): array
     {

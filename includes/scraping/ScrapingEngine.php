@@ -65,6 +65,22 @@ class RmScrapingEngine
     public function thumbnails(): RmThumbnailEngine { return $this->thumbs; }
     public function run(): ?RmScrapeRun { return $this->run; }
 
+    /**
+     * Every log line in the engine goes through here, so a standalone
+     * episode sync is just as traceable as one inside a run — the only
+     * difference is that its rows carry a NULL run_id.
+     */
+    private function log(string $event, string $message = '', array $ctx = []): void
+    {
+        if ($this->run) $this->run->log($event, $message, $ctx);
+        else RmScrapeRun::note($event, $message, $ctx);
+    }
+
+    private function tally(string $key, int $n = 1): void
+    {
+        if ($this->run) $this->run->count($key, $n);
+    }
+
     // ────────────────────────────────────────────────────────────
     // STAGE 1 — COLLECT
     // ────────────────────────────────────────────────────────────
@@ -148,15 +164,13 @@ class RmScrapingEngine
                 'ms'             => (int)($data['_ms'] ?? 0),
             ]);
 
-            if ($this->run) {
-                $line = $outcome === 'success'
-                    ? 'fetched (' . implode(', ', $fields) . ')' . (!empty($data['_cached']) ? ' [cache]' : '')
-                    : ($data['_error'] ?? $status);
-                $this->run->log('source.' . $outcome, $line,
-                    ['episode'=>$epNum,'source'=>$name,'ms'=>(int)($data['_ms'] ?? 0),
-                     'level'=>$outcome === 'success' ? 'info' : ($outcome === 'failure' ? 'error' : 'warning')]);
-                $this->run->count($outcome === 'success' ? 'src_ok' : ($outcome === 'failure' ? 'src_failed' : 'src_skipped'));
-            }
+            $line = $outcome === 'success'
+                ? 'fetched (' . implode(', ', $fields) . ')' . (!empty($data['_cached']) ? ' [cache]' : '')
+                : ($data['_error'] ?? $status);
+            $this->log('source.' . $outcome, $line,
+                ['episode'=>$epNum,'source'=>$name,'ms'=>(int)($data['_ms'] ?? 0),
+                 'level'=>$outcome === 'success' ? 'info' : ($outcome === 'failure' ? 'error' : 'warning')]);
+            $this->tally($outcome === 'success' ? 'src_ok' : ($outcome === 'failure' ? 'src_failed' : 'src_skipped'));
 
             if ($fields) {
                 $payload = [];
@@ -176,7 +190,7 @@ class RmScrapingEngine
             if (!isset($meta[$name]) && $a->fields()) {
                 $meta[$name] = ['status'=>'skipped','url'=>null,'error'=>'Not needed for the requested fields',
                                 'class'=>null,'http'=>null,'ms'=>0,'fields'=>[],'cached'=>false,'version'=>$a->parserVersion()];
-                if ($this->run) $this->run->count('src_skipped');
+                $this->tally('src_skipped');
             }
         }
 
@@ -198,6 +212,11 @@ class RmScrapingEngine
                 ? array_keys((array)rmScrapeConfig('field_priority', []))
                 : $this->fieldsForGaps($this->missing->gaps($epNum, $existing));
         }
+        // With thumbnails skipped, image_url must not enter the diff:
+        // proposing a change nothing will act on makes every re-sync look
+        // like it has pending work forever.
+        if (!empty($opt['skip_thumbnail'])) $wanted = array_values(array_diff($wanted, ['image_url']));
+
         if (!$wanted) {
             return ['episode'=>$epNum,'skipped'=>true,'reason'=>'Episode is already complete — no sources contacted',
                     'is_new'=>false,'changes'=>[],'apply'=>[],'resolved'=>[],'meta'=>[],'warnings'=>[],
@@ -285,9 +304,9 @@ class RmScrapingEngine
             if ($suspects) {
                 $plan['duplicate_suspects'] = $suspects;
                 if (!$dryRun) $this->dupes->flagAll($epNum, $suspects);
-                if ($this->run) $this->run->warn('duplicate.suspected',
+                $this->log('duplicate.suspected',
                     'Possible duplicate of EP' . implode(', EP', array_column($suspects, 'episode_number')) . ' — saved anyway, flagged for review',
-                    ['episode'=>$epNum]);
+                    ['episode'=>$epNum, 'level'=>'warning']);
             }
         }
 
@@ -318,7 +337,7 @@ class RmScrapingEngine
                     if ($r['review']) $reviews[] = $r['review'];
                 }
                 $plan['guest_reviews'] = $reviews;
-                if ($added && $this->run) $this->run->log('guests.new', "$added new guest record(s) created", ['episode'=>$epNum]);
+                if ($added) $this->log('guests.new', "$added new guest record(s) created", ['episode'=>$epNum]);
             }
 
             // Tags — additive.
@@ -368,7 +387,7 @@ class RmScrapingEngine
             if ($inTx && $this->db->inTransaction()) $this->db->rollBack();
             $plan['failed'] = true;
             $plan['reason'] = 'Save failed: ' . $e->getMessage();
-            if ($this->run) $this->run->error('episode.save_failed', $e->getMessage(), ['episode'=>$epNum]);
+            $this->log('episode.save_failed', $e->getMessage(), ['episode'=>$epNum, 'level'=>'error']);
             return $plan;
         }
     }
@@ -519,11 +538,9 @@ class RmScrapingEngine
         if ($res['ok'] && $res['path'] && !$res['skipped']) {
             $this->thumbs->link($epNum, $res['path'], $res['url']);
         }
-        if ($this->run) {
-            $this->run->log($res['ok'] ? 'thumbnail.ok' : 'thumbnail.failed',
-                $res['reason'] ?? ($res['ok'] ? 'verified and stored' : 'no usable image'),
-                ['episode'=>$epNum,'source'=>$res['source'],'level'=>$res['ok'] ? 'info' : 'warning']);
-        }
+        $this->log($res['ok'] ? 'thumbnail.ok' : 'thumbnail.failed',
+            $res['reason'] ?? ($res['ok'] ? 'verified and stored' : 'no usable image'),
+            ['episode'=>$epNum,'source'=>$res['source'],'level'=>$res['ok'] ? 'info' : 'warning']);
         return $res;
     }
 
@@ -533,30 +550,28 @@ class RmScrapingEngine
     public function syncEpisode(int $epNum, array $opt = []): array
     {
         $t0 = microtime(true);
-        if ($this->run) $this->run->log('episode.start', "EP$epNum started", ['episode'=>$epNum]);
+        $this->log('episode.start', "EP$epNum started", ['episode'=>$epNum]);
 
         $plan   = $this->plan($epNum, $opt);
         $result = $this->apply($plan, $opt);
         $ms     = (int)round((microtime(true) - $t0) * 1000);
         $result['ms'] = $ms;
 
-        if ($this->run) {
-            if (!empty($result['skipped'])) {
-                $this->run->count('skipped');
-                $this->run->log('episode.skipped', (string)($result['reason'] ?? 'already complete'), ['episode'=>$epNum,'ms'=>$ms]);
-            } elseif (!empty($result['failed'])) {
-                $this->run->count('failed');
-                $this->run->error('episode.failed', (string)($result['reason'] ?? 'unknown failure'), ['episode'=>$epNum,'ms'=>$ms]);
-            } else {
-                $applied = (int)($result['summary']['total_applied'] ?? 0);
-                if (!empty($result['is_new'])) $this->run->count('added'); elseif ($applied > 0) $this->run->count('updated'); else $this->run->count('skipped');
-                $this->run->log('episode.saved',
-                    (!empty($result['is_new']) ? 'added' : ($applied ? "updated ($applied field" . ($applied === 1 ? '' : 's') . ')' : 'no changes needed'))
-                    . (!empty($opt['dry_run']) ? ' [DRY RUN — nothing written]' : ''),
-                    ['episode'=>$epNum,'ms'=>$ms]);
-            }
-            $this->run->count('checked');
+        if (!empty($result['skipped'])) {
+            $this->tally('skipped');
+            $this->log('episode.skipped', (string)($result['reason'] ?? 'already complete'), ['episode'=>$epNum,'ms'=>$ms]);
+        } elseif (!empty($result['failed'])) {
+            $this->tally('failed');
+            $this->log('episode.failed', (string)($result['reason'] ?? 'unknown failure'), ['episode'=>$epNum,'ms'=>$ms,'level'=>'error']);
+        } else {
+            $applied = (int)($result['summary']['total_applied'] ?? 0);
+            if (!empty($result['is_new'])) $this->tally('added'); elseif ($applied > 0) $this->tally('updated'); else $this->tally('skipped');
+            $this->log('episode.saved',
+                (!empty($result['is_new']) ? 'added' : ($applied ? "updated ($applied field" . ($applied === 1 ? '' : 's') . ')' : 'no changes needed'))
+                . (!empty($opt['dry_run']) ? ' [DRY RUN — nothing written]' : ''),
+                ['episode'=>$epNum,'ms'=>$ms]);
         }
+        $this->tally('checked');
         return $result;
     }
 

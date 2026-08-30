@@ -122,7 +122,8 @@ class RmSourceHealth
             $succ   = (int)$h['success_count'];
             $fail   = (int)$h['failure_count'];
 
-            if ($class === RmHttpClient::CLASS_BLOCKED)            $status = self::BLOCKED;
+            if ($class === RmHttpClient::CLASS_BLOCKED
+                || $class === RmHttpClient::CLASS_PROXY)           $status = self::BLOCKED;
             elseif ($class === RmHttpClient::CLASS_RATE_LIMITED)   $status = self::RATE_LIMITED;
             elseif ($consec >= 3)                                  $status = self::DOWN;
             elseif ((int)$h['parser_warnings'] >= (int)rmScrapeConfig('safety.parser_warning_after', 3)

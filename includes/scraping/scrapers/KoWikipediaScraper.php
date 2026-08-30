@@ -18,6 +18,9 @@ require_once __DIR__ . '/AbstractScraper.php';
 
 class KoWikipediaScraper extends RmScraper
 {
+    private ?string $lastFetchError = null;
+    private ?string $lastFetchClass = null;
+
     public function name(): string { return 'kowiki'; }
     public function parserVersion(): string { return 'kowiki-1.0'; }
 
@@ -44,6 +47,11 @@ class KoWikipediaScraper extends RmScraper
         }
 
         $html = null;
+        // Track WHY the page is unavailable: "could not reach ko.wikipedia"
+        // and "reached it, no episode table there" are different problems
+        // and must not both be reported as an empty result.
+        $this->lastFetchError = null;
+        $this->lastFetchClass = null;
         foreach ($this->pageTitles($year) as $title) {
             $url = 'https://ko.wikipedia.org/w/api.php?' . http_build_query([
                 'action'=>'parse','page'=>$title,'prop'=>'text','format'=>'json',
@@ -55,7 +63,12 @@ class KoWikipediaScraper extends RmScraper
                 'cache_key' => "kowiki:page:$year:" . md5($title),
                 'bypass_cache' => $bypass,
             ]);
-            if (!$res->ok || !is_array($data) || isset($data['error'])) continue;
+            if (!$res->ok) {
+                $this->lastFetchError = $res->error;
+                $this->lastFetchClass = $res->errorClass;
+                continue;
+            }
+            if (!is_array($data) || isset($data['error'])) continue;
             $candidate = $data['parse']['text']['*'] ?? null;
             if ($candidate && strlen($candidate) > 2000) { $html = $candidate; break; }
         }
@@ -141,6 +154,11 @@ class KoWikipediaScraper extends RmScraper
         $ms   = (int)round((microtime(true) - $t0) * 1000);
 
         if (!$all) {
+            // Unreachable is a FETCH failure; reachable-but-no-table is not.
+            if ($this->lastFetchError !== null) {
+                return $this->emptyResult($url, 'fetch_failed', $this->lastFetchError,
+                    ['_ms' => $ms, '_error_class' => $this->lastFetchClass ?? RmHttpClient::CLASS_OTHER]);
+            }
             return $this->emptyResult($url, 'empty',
                 "No Korean episode table found for $year (article may not exist or uses different headers)",
                 ['_ms' => $ms, '_error_class' => 'missing_page']);

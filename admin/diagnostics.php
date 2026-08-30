@@ -84,45 +84,94 @@ if (isset($_GET['a']) && $_GET['a'] === 'wikitrace') {
 }
 
 // ── AJAX: full single-episode scrape trace ──────────────────────
+// Now traces the whole engine, not just three hardcoded sources: what
+// EVERY registered source returned (with its status, timing and real
+// failure reason), then how the resolver chose each field, with the
+// confidence and any disagreement it found. This is the tool for
+// answering "why does EP809 have that synopsis?".
 if (isset($_GET['a']) && $_GET['a'] === 'eptrace') {
     header('Content-Type: application/json');
-    set_time_limit(20);
+    set_time_limit(180);
+    if (ob_get_level() > 0) ob_clean();
     $ep = (int)($_GET['ep'] ?? 0);
     if ($ep < 1) { echo json_encode(['ok'=>false,'error'=>'Enter a valid episode number']); exit; }
 
-    $t0 = microtime(true);
-    $wiki = rmWikiEpisode($ep);
-    $t1 = microtime(true);
-    $myrm = rmMyrmTvEpisode($ep);
-    $t2 = microtime(true);
-    $extra = rmMyRunningManExtra($ep);
-    $t3 = microtime(true);
-    // Only call MyDramaList if rmScrapeEpisode() would actually call it too
-    // (gated behind RM_ENABLE_MYDRAMALIST — confirmed dead end, see comment
-    // above rmMyDramaListEpisode() in scraper.php: flat HTTP 403 from this
-    // network even with full browser headers, almost certainly TLS-fingerprint
-    // or IP-reputation blocking that no PHP curl header can work around).
-    $wouldNeedMdl = RM_ENABLE_MYDRAMALIST && (
-        (empty($wiki['synopsis']) && empty($myrm['synopsis']))
-        || empty($extra['location']) || (empty($wiki['guests']) && empty($myrm['guests']))
-    );
-    $mdl = $wouldNeedMdl ? rmMyDramaListEpisode($ep) : null;
-    $mdlErr = $wouldNeedMdl ? rmLastMdlError() : null;
-    $t3b = microtime(true);
-    $merged = rmScrapeEpisode($ep);
-    $t4 = microtime(true);
+    try {
+        $engine = new RmScrapingEngine();
+        $t0 = microtime(true);
+        // Dry run: contacts every source and computes the full plan, but
+        // is guaranteed not to write anything to the database.
+        $plan = $engine->dryRun($ep, ['bypass_cache' => !empty($_GET['fresh'])]);
+        $ms = (int)round((microtime(true) - $t0) * 1000);
 
-    echo json_encode([
-        'episode'  => $ep,
-        'year_used'=> rmYear($ep),
-        'wikipedia'=> ['data'=>$wiki, 'ms'=>round(($t1-$t0)*1000)],
-        'myrm_tv'  => ['data'=>$myrm, 'ms'=>round(($t2-$t1)*1000)],
-        'myrunningman'=> ['data'=>$extra, 'ms'=>round(($t3-$t2)*1000)],
-        'mydramalist'=> $mdl !== null
-            ? ['data'=>$mdl, 'ms'=>round(($t3b-$t3)*1000), 'error'=>$mdlErr]
-            : ['data'=>null,'ms'=>0,'skipped'=> RM_ENABLE_MYDRAMALIST ? 'not needed — first 3 sources already had this data' : 'disabled — confirmed HTTP 403 from this network (TLS-fingerprint/IP blocking), see RM_ENABLE_MYDRAMALIST in scraper.php'],
-        'merged'   => ['data'=>$merged, 'ms'=>round(($t4-$t3b)*1000)],
-    ]);
+        $sources = [];
+        foreach ((array)($plan['meta'] ?? []) as $name => $m) {
+            $sources[$name] = [
+                'status' => $m['status'], 'ms' => $m['ms'], 'http' => $m['http'],
+                'fields' => $m['fields'], 'error' => $m['error'], 'class' => $m['class'],
+                'cached' => $m['cached'], 'url' => $m['url'], 'parser' => $m['version'],
+                'data'   => array_intersect_key((array)($plan['payloads'][$name] ?? []), array_flip($m['fields'])),
+            ];
+        }
+
+        $resolution = [];
+        foreach ((array)($plan['resolved'] ?? []) as $field => $r) {
+            $resolution[$field] = [
+                'value'      => is_array($r['value'] ?? null) ? implode(', ', array_map('strval', $r['value'])) : ($r['value'] ?? null),
+                'source'     => $r['source'] ?? null,
+                'agreed_by'  => $r['sources'] ?? [],
+                'confidence' => $r['confidence'] ?? null,
+                'conflicts'  => $r['conflicts'] ?? [],
+                'rejected'   => $r['rejected'] ?? [],
+            ];
+        }
+
+        echo json_encode([
+            'ok'         => true,
+            'episode'    => $ep,
+            'year_used'  => rmYear($ep),
+            'total_ms'   => $ms,
+            'is_new'     => !empty($plan['is_new']),
+            'sources'    => $sources,
+            'resolution' => $resolution,
+            'changes'    => array_map([RmDiffEngine::class, 'renderLine'],
+                                array_values(array_filter((array)($plan['changes'] ?? []), fn($c) => $c['type'] !== 'unchanged'))),
+            'warnings'   => array_column((array)($plan['warnings'] ?? []), 'message'),
+            'note'       => 'Dry run — no database changes were made.',
+        ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    } catch (Throwable $e) {
+        echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
+    }
+    exit;
+}
+
+// ── AJAX: offline engine self-test ──────────────────────────────
+// Exercises the rules that must never silently regress — guest identity
+// collapsing, location normalisation, garbage rejection, field priority,
+// confidence scoring and the data-safety guards. No network, no writes.
+if (isset($_GET['a']) && $_GET['a'] === 'selftest') {
+    header('Content-Type: application/json');
+    if (ob_get_level() > 0) ob_clean();
+    try {
+        require_once __DIR__ . '/../includes/scraping/selftest.php';
+        echo json_encode(['ok' => true] + rmScrapingSelfTest());
+    } catch (Throwable $e) {
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// ── AJAX: source health snapshot ────────────────────────────────
+if (isset($_GET['a']) && $_GET['a'] === 'srchealth') {
+    header('Content-Type: application/json');
+    set_time_limit(90);
+    if (ob_get_level() > 0) ob_clean();
+    try {
+        $h = RmSourceHealth::instance();
+        echo json_encode(['ok'=>true, 'sources'=>$h->all(), 'probe'=>!empty($_GET['probe']) ? $h->probeAll() : []]);
+    } catch (Throwable $e) {
+        echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
+    }
     exit;
 }
 
@@ -208,16 +257,20 @@ if (isset($_GET['a']) && $_GET['a'] === 'mrminspect') {
 
 // ── AJAX: cache file listing + clear ─────────────────────────────
 function rmListCacheFiles(): array {
-    $dir = sys_get_temp_dir();
     $files = [];
-    foreach (glob("$dir/rm_*") as $f) {
-        $files[] = [
-            'name' => basename($f),
-            'size' => filesize($f),
-            'age_min' => round((time()-filemtime($f))/60, 1),
-        ];
+    // Legacy temp files plus the scraping engine's own cache directory,
+    // so "clear cache" here really does clear everything the scraper reads.
+    foreach (glob(sys_get_temp_dir() . '/rm_*') as $f) {
+        if (is_dir($f)) continue;
+        $files[] = ['name' => basename($f), 'size' => (int)filesize($f),
+                    'age_min' => round((time() - filemtime($f)) / 60, 1), 'engine' => false];
     }
-    usort($files, fn($a,$b) => strcmp($a['name'],$b['name']));
+    $engineDir = RmCache::instance()->dir();
+    foreach (glob($engineDir . '/*.json') as $f) {
+        $files[] = ['name' => 'engine/' . basename($f), 'size' => (int)filesize($f),
+                    'age_min' => round((time() - filemtime($f)) / 60, 1), 'engine' => true];
+    }
+    usort($files, fn($a, $b) => strcmp($a['name'], $b['name']));
     return $files;
 }
 if (isset($_GET['a']) && $_GET['a'] === 'cachelist') {
@@ -230,7 +283,20 @@ if (isset($_GET['a']) && $_GET['a'] === 'cacheclear') {
     $target = $_GET['file'] ?? 'all';
     $dir = sys_get_temp_dir();
     $cleared = [];
+    // Engine cache entries are namespaced "engine/<file>" in the listing.
+    if ($target === 'all' || str_starts_with($target, 'engine/')) {
+        $engineDir = RmCache::instance()->dir();
+        foreach (glob($engineDir . '/*.json') as $f) {
+            if ($target === 'all' || basename($f) === substr($target, 7)) {
+                if (@unlink($f)) $cleared[] = 'engine/' . basename($f);
+            }
+        }
+        // A manual cache clear is also the operator saying "try the failing
+        // sources again now", so lift any automatic cool-downs with it.
+        if ($target === 'all') RmSourceHealth::instance()->clearSuppression();
+    }
     foreach (glob("$dir/rm_*") as $f) {
+        if (is_dir($f)) continue;
         if ($target === 'all' || basename($f) === $target) {
             @unlink($f);
             $cleared[] = basename($f);
@@ -249,6 +315,16 @@ $expectedFunctions = ['rmFetch','rmWikiFetchYearPage','rmWikiParseHtml','rmWikiP
     'rmWikiEpisode','rmMyrmTvEpisode','rmScrapeEpisode','rmGetLatestEpNumber',
     'rmEpisodeExistsOnMRM','rmCleanTitle','rmDownloadThumb','rmYear','rmLastFetchError'];
 $missingFunctions = array_values(array_filter($expectedFunctions, fn($f) => !function_exists($f)));
+
+// Engine components — a missing class here means an incomplete deployment,
+// which looks identical to "the scraper stopped working" from the outside.
+$expectedClasses = ['RmScrapingEngine','RmSourceRegistry','RmFieldResolver','RmDiffEngine',
+    'RmNormalizer','RmValidator','RmProvenance','RmSourceHealth','RmThumbnailEngine',
+    'RmCache','RmHttpClient','RmMissingData','RmScrapeRun'];
+$missingClasses = array_values(array_filter($expectedClasses, fn($c) => !class_exists($c)));
+$engineTablesReady = rmScrapingTablesExist();
+$registeredSources = array_keys(RmSourceRegistry::instance()->all());
+$activeSources     = array_keys(RmSourceRegistry::instance()->active(true));
 ?>
 
 <div class="at">
@@ -268,8 +344,25 @@ $missingFunctions = array_values(array_filter($expectedFunctions, fn($f) => !fun
     <tr><td style="color:rgba(255,255,255,.4)">Required functions</td><td>
       <?= $missingFunctions ? '<span style="color:#fca5a5">MISSING: '.h(implode(', ',$missingFunctions)).' — old scraper.php is likely still loaded</span>' : '<span style="color:#86efac">all '.count($expectedFunctions).' present</span>' ?>
     </td></tr>
+    <tr><td style="color:rgba(255,255,255,.4)">Engine components</td><td>
+      <?= $missingClasses ? '<span style="color:#fca5a5">MISSING: '.h(implode(', ',$missingClasses)).' — includes/scraping/ is incomplete</span>' : '<span style="color:#86efac">all '.count($expectedClasses).' loaded</span>' ?>
+    </td></tr>
+    <tr><td style="color:rgba(255,255,255,.4)">Registered sources</td><td>
+      <?= h(implode(', ', $registeredSources)) ?>
+      <span style="color:rgba(255,255,255,.3)">· active: <?= h(implode(', ', $activeSources)) ?></span>
+    </td></tr>
+    <tr><td style="color:rgba(255,255,255,.4)">Engine tables</td><td>
+      <?php if ($engineTablesReady): ?><span style="color:#86efac">installed</span>
+      <?php else: ?><span style="color:#fcd34d">not installed — provenance, change tracking and run history are disabled.
+        Install from <a href="<?= bp() ?>/admin/scraper.php" style="color:inherit;text-decoration:underline">Scraper Control Centre</a></span><?php endif; ?>
+    </td></tr>
     <tr><td style="color:rgba(255,255,255,.4)">DB latest episode</td><td>EP<?= str_pad($dbMax,3,'0',STR_PAD_LEFT) ?></td></tr>
   </table>
+  <div style="margin-top:.8rem">
+    <button class="btn btn-dark btn-sm" onclick="runSelfTest()">🧪 Run engine self-test (offline)</button>
+    <span style="font-size:.74rem;color:rgba(255,255,255,.3);margin-left:.4rem">Checks normalisation, validation, resolution and data-safety rules. No network, no writes.</span>
+    <div id="selfTestResult" style="margin-top:.7rem"></div>
+  </div>
 </div>
 
 <!-- Section B: Network Connectivity -->
@@ -307,15 +400,35 @@ $missingFunctions = array_values(array_filter($expectedFunctions, fn($f) => !fun
   <div id="wikiTraceResult"></div>
 </div>
 
+<!-- Section C2: Source Health -->
+<div class="ap">
+  <div class="sh">Source Health</div>
+  <p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.8rem">
+    What each source has actually been doing, and <em>how</em> it is failing when it fails — a DNS failure, a 403,
+    and "reachable but returning nothing" are three different problems with three different fixes. Full controls
+    live in the <a href="<?= bp() ?>/admin/scraper.php">Scraper Control Centre</a>.
+  </p>
+  <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.8rem">
+    <button class="btn btn-sm" onclick="loadSrcHealth(false)">↻ Show recorded health</button>
+    <button class="btn btn-dark btn-sm" onclick="loadSrcHealth(true)">📡 Probe every source now</button>
+  </div>
+  <div id="srcHealthResult"></div>
+</div>
+
 <!-- Section D: Single Episode Scrape Trace -->
 <div class="ap">
   <div class="sh">Single Episode Scrape Trace</div>
   <p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.8rem">
-    Runs Wikipedia + myrm.tv + myrunningman.com + MyDramaList (4th fallback) + the merge logic for one episode, showing exactly what each source contributed.
+    Runs the full engine for one episode as a <strong>dry run</strong> — every registered source is contacted,
+    then the resolver picks each field and reports its confidence. Nothing is written to the database.
+    This answers both "what did each source return?" and "why did this value win?".
   </p>
   <div style="display:flex;gap:.5rem;align-items:center">
     <span style="font-size:.8rem;color:rgba(255,255,255,.4)">Episode #:</span>
     <input type="number" id="traceEp" value="<?= $dbMax+1 ?>" style="width:90px;padding:.4rem .7rem;background:#141c2c;border:1px solid rgba(41,171,226,.14);border-radius:7px;color:#eef2f8;font-size:.82rem;outline:none">
+    <label style="font-size:.76rem;color:rgba(255,255,255,.4);display:flex;align-items:center;gap:.3rem">
+      <input type="checkbox" id="traceFresh"> bypass cache
+    </label>
     <button class="btn btn-sm" onclick="runEpTrace()">▶ Trace This Episode</button>
   </div>
   <div id="epTraceResult" style="margin-top:.8rem"></div>
@@ -408,24 +521,105 @@ async function runWikiTrace(){
 
 async function runEpTrace(){
   var ep=document.getElementById('traceEp').value;
+  var fresh=document.getElementById('traceFresh').checked?'&fresh=1':'';
   var out=document.getElementById('epTraceResult');
-  out.innerHTML='<span class="spin"></span> Scraping EP'+ep+' from all sources…';
+  out.innerHTML='<span class="spin"></span> Running the full engine for EP'+ep+' (dry run)…';
   try{
-    var r=await fetch(BP+'/admin/diagnostics.php?a=eptrace&ep='+ep);
+    var r=await fetch(BP+'/admin/diagnostics.php?a=eptrace&ep='+ep+fresh);
     var d=await r.json();
-    var fmt=function(label,obj){
-      if (!obj.data) {
-        return '<div style="background:#141c2c;border:1px solid rgba(41,171,226,.1);border-radius:8px;padding:.7rem;margin-top:.5rem">'
-          +'<div style="display:flex;justify-content:space-between"><strong style="font-size:.8rem">'+label+'</strong><span style="font-size:.7rem;color:rgba(255,255,255,.3)">skipped</span></div>'
-          +'<div style="font-size:.74rem;color:rgba(255,255,255,.35);margin-top:.3rem">'+h(obj.skipped||'no data')+'</div></div>';
-      }
-      return '<div style="background:#141c2c;border:1px solid rgba(41,171,226,.1);border-radius:8px;padding:.7rem;margin-top:.5rem">'
-        +'<div style="display:flex;justify-content:space-between"><strong style="font-size:.8rem">'+label+'</strong><span style="font-size:.7rem;color:rgba(255,255,255,.3)">'+obj.ms+'ms</span></div>'
-        +(obj.error ? '<div style="font-size:.74rem;color:#fca5a5;margin-top:.3rem">⚠ '+h(obj.error)+'</div>' : '')
-        +'<div class="diag-pre" style="margin-top:.4rem;max-height:160px">'+h(JSON.stringify(obj.data,null,2))+'</div></div>';
+    if(!d.ok){ out.innerHTML='<span class="diag-fail">'+h(d.error||'trace failed')+'</span>'; return; }
+
+    var confColour={high:'#4ade80',medium:'#facc15',low:'#fb923c',conflict:'#f87171'};
+    var statusColour=function(st){
+      if(st==='ok') return '#86efac';
+      if(st==='skipped'||st==='missing_episode'||st==='not_applicable'||st==='disabled') return 'rgba(255,255,255,.35)';
+      if(st==='parser_warning'||st==='empty') return '#fcd34d';
+      return '#fca5a5';
     };
-    out.innerHTML = '<div style="font-size:.78rem;color:rgba(255,255,255,.4)">Episode '+d.episode+' → year '+d.year_used+'</div>'
-      + fmt('Wikipedia', d.wikipedia) + fmt('myrm.tv', d.myrm_tv) + fmt('myrunningman.com', d.myrunningman) + fmt('MyDramaList (4th fallback)', d.mydramalist) + fmt('Merged (final result)', d.merged);
+
+    var html='<div style="font-size:.78rem;color:rgba(255,255,255,.4)">Episode '+d.episode+' → year '+d.year_used
+      +' · '+d.total_ms+'ms total · '+(d.is_new?'not yet in the database':'already in the database')
+      +' · <span style="color:#86efac">'+h(d.note)+'</span></div>';
+
+    html+='<div style="font-size:.7rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:rgba(41,171,226,.45);margin:1rem 0 .4rem">Per-source result</div>';
+    Object.keys(d.sources||{}).forEach(function(name){
+      var o=d.sources[name];
+      html+='<div style="background:#141c2c;border:1px solid rgba(41,171,226,.1);border-radius:8px;padding:.7rem;margin-top:.5rem">'
+        +'<div style="display:flex;justify-content:space-between;align-items:baseline">'
+        +'<strong style="font-size:.8rem">'+h(name)+'</strong>'
+        +'<span style="font-size:.7rem;color:'+statusColour(o.status)+'">'+h(o.status)
+        +(o.cached?' [cache]':'')+(o.ms?' · '+o.ms+'ms':'')+(o.http?' · HTTP '+o.http:'')+'</span></div>'
+        +(o.error?'<div style="font-size:.74rem;color:#fca5a5;margin-top:.3rem">⚠ '+h(o.error)+'</div>':'')
+        +(o.fields&&o.fields.length?'<div style="font-size:.72rem;color:rgba(41,171,226,.7);margin-top:.3rem">provided: '+h(o.fields.join(', '))+'</div>':'')
+        +(o.data&&Object.keys(o.data).length?'<div class="diag-pre" style="margin-top:.4rem;max-height:160px">'+h(JSON.stringify(o.data,null,2))+'</div>':'')
+        +'</div>';
+    });
+
+    html+='<div style="font-size:.7rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:rgba(41,171,226,.45);margin:1.1rem 0 .4rem">Field resolution — who won, and how sure</div>';
+    html+='<table class="atable"><thead><tr><th>Field</th><th>Winner</th><th>Value</th><th>Confidence</th><th>Disagreement</th></tr></thead><tbody>';
+    Object.keys(d.resolution||{}).forEach(function(f){
+      var x=d.resolution[f];
+      html+='<tr><td style="font-weight:700">'+h(f)+'</td>'
+        +'<td>'+h(x.source||'—')+(x.agreed_by&&x.agreed_by.length>1?'<br><span style="font-size:.68rem;color:rgba(255,255,255,.35)">agreed by '+h(x.agreed_by.join(', '))+'</span>':'')+'</td>'
+        +'<td style="max-width:280px">'+h(String(x.value==null?'':x.value).slice(0,140))+'</td>'
+        +'<td style="color:'+(confColour[x.confidence]||'rgba(255,255,255,.35)')+';font-weight:700">'+h(String(x.confidence||'—').toUpperCase())+'</td>'
+        +'<td style="font-size:.72rem;color:rgba(255,255,255,.4)">'
+        +((x.conflicts||[]).map(function(c){return h(c.source)+': '+h(String(c.value).slice(0,50));}).join('<br>')||'—')
+        +((x.rejected||[]).length?'<br><span style="color:#fcd34d">rejected: '+(x.rejected||[]).map(function(rj){return h(rj.source)+' ('+h(String(rj.reason).slice(0,60))+')';}).join('; ')+'</span>':'')
+        +'</td></tr>';
+    });
+    html+='</tbody></table>';
+
+    if(d.changes&&d.changes.length){
+      html+='<div style="font-size:.7rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:rgba(41,171,226,.45);margin:1.1rem 0 .4rem">What a real sync would change</div>'
+        +'<div class="diag-pre">'+d.changes.map(h).join('\n')+'</div>';
+    }
+    if(d.warnings&&d.warnings.length){
+      html+='<div style="margin-top:.7rem;color:#fcd34d;font-size:.76rem">'+d.warnings.map(h).join('<br>')+'</div>';
+    }
+    out.innerHTML=html;
+  }catch(e){ out.innerHTML='<span class="diag-fail">Request failed: '+h(e.message)+'</span>'; }
+}
+
+async function runSelfTest(){
+  var out=document.getElementById('selfTestResult');
+  out.innerHTML='<span class="spin"></span> Running offline checks…';
+  try{
+    var r=await fetch(BP+'/admin/diagnostics.php?a=selftest');
+    var d=await r.json();
+    if(!d.ok){ out.innerHTML='<span class="diag-fail">'+h(d.error||'failed')+'</span>'; return; }
+    var fails=(d.results||[]).filter(function(x){return !x.pass;});
+    out.innerHTML='<div style="font-weight:700;color:'+(fails.length?'#fca5a5':'#86efac')+'">'
+      +d.passed+'/'+d.total+' checks passed'+(fails.length?' — '+fails.length+' FAILING':'')+'</div>'
+      +(fails.length?'<div class="diag-pre" style="margin-top:.5rem">'+fails.map(function(f){
+          return '['+h(f.group)+'] '+h(f.name)+'\n    expected '+h(f.expected)+', got '+h(f.actual);
+        }).join('\n')+'</div>':'');
+  }catch(e){ out.innerHTML='<span class="diag-fail">Request failed: '+h(e.message)+'</span>'; }
+}
+
+async function loadSrcHealth(probe){
+  var out=document.getElementById('srcHealthResult');
+  out.innerHTML='<span class="spin"></span> '+(probe?'Probing every source…':'Loading recorded health…');
+  try{
+    var r=await fetch(BP+'/admin/diagnostics.php?a=srchealth'+(probe?'&probe=1':''));
+    var d=await r.json();
+    if(!d.ok){ out.innerHTML='<span class="diag-fail">'+h(d.error||'failed')+'</span>'; return; }
+    var colour={ok:'#4ade80',parser_warning:'#facc15',degraded:'#facc15',rate_limited:'#fb923c',blocked:'#f87171',down:'#f87171',disabled:'#64748b',unknown:'#64748b'};
+    var html='<table class="atable"><thead><tr><th>Source</th><th>Status</th><th>Success rate</th><th>Last success</th><th>Avg</th><th>Diagnosis</th></tr></thead><tbody>';
+    Object.keys(d.sources).forEach(function(k){
+      var s=d.sources[k], p=(d.probe||{})[k];
+      html+='<tr><td style="font-weight:700">'+h(s.label||k)+'<br><span style="font-size:.68rem;color:rgba(255,255,255,.3)">tier '+s.tier+'</span></td>'
+        +'<td style="color:'+(colour[s.status]||'#64748b')+';font-weight:700">'+h(String(s.status).replace(/_/g,' '))
+        +(p?'<br><span style="font-size:.68rem;color:'+(p.ok?'#86efac':'#fca5a5')+'">probe: '+(p.ok?'reachable '+p.ms+'ms':h(String(p.status)))+'</span>':'')+'</td>'
+        +'<td>'+(s.success_rate==null?'—':s.success_rate+'%')+'<span style="font-size:.68rem;color:rgba(255,255,255,.3)"> ('+s.success_count+'/'+(s.success_count+s.failure_count)+')</span></td>'
+        +'<td style="font-size:.74rem">'+h(s.last_success_at?String(s.last_success_at).slice(0,16):'never')+'</td>'
+        +'<td style="font-size:.74rem">'+(s.avg_ms?s.avg_ms+'ms':'—')+'</td>'
+        +'<td style="font-size:.72rem;color:rgba(255,255,255,.45);max-width:320px">'
+        +(s.parser_warnings?'<span style="color:#fcd34d">'+s.parser_warnings+' parser warning(s)</span><br>':'')
+        +(s.suppressed_until?'<span style="color:#fb923c">cooling down until '+h(String(s.suppressed_until).slice(11,16))+'</span><br>':'')
+        +h(s.last_error||(p&&p.error?String(p.error):'—'))+'</td></tr>';
+    });
+    out.innerHTML=html+'</tbody></table>';
   }catch(e){ out.innerHTML='<span class="diag-fail">Request failed: '+h(e.message)+'</span>'; }
 }
 

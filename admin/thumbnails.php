@@ -12,26 +12,61 @@ adminCheck();
 $db = getDB();
 
 // AJAX grab one thumbnail
+// Goes through the thumbnail engine, so a single episode now tries EVERY
+// source that offered an image (in image_url priority order) instead of
+// giving up when the first one has a dead link, and each candidate is
+// validated as a real image of a real size before anything is saved.
+// An identical image already on disk is not re-downloaded.
 if (isset($_GET['a']) && $_GET['a']==='grab' && isset($_GET['ep'])) {
     header('Content-Type: application/json');
-    set_time_limit(30);
+    set_time_limit(60);
     $n = (int)$_GET['ep'];
-    $d = rmScrapeEpisode($n);
-    if ($d && !empty($d['image_url'])) {
-        $wp = rmDownloadThumb($d['image_url'], $n, rmYear($n));
-        if ($wp) {
-            $db->prepare("INSERT INTO thumbnails (episode_number,local_path,thumbnail_url,verified) VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE local_path=VALUES(local_path),thumbnail_url=VALUES(thumbnail_url),verified=1")
-               ->execute([$n,$wp,$d['image_url']]);
-            $db->prepare("UPDATE episodes SET thumbnail_id=(SELECT thumbnail_id FROM thumbnails WHERE episode_number=? LIMIT 1) WHERE episode_number=? AND thumbnail_id IS NULL")
-               ->execute([$n,$n]);
-            @unlink(sys_get_temp_dir().'/rm_stats.json');
-            logActivity('thumbnail', $n, 'success', 'Downloaded');
-                echo json_encode(['ok'=>true,'ep'=>$n,'path'=>$wp]);
+
+    try {
+        $engine    = new RmScrapingEngine();
+        $collected = $engine->collect($n, ['image_url']);
+
+        // Candidates in this field's configured priority order.
+        $candidates = [];
+        foreach ((array)rmScrapeConfig('field_priority.image_url', []) as $src) {
+            $url = $collected['payloads'][$src]['image_url'] ?? null;
+            if (is_string($url) && $url !== '') $candidates[] = ['url' => $url, 'source' => $src];
+        }
+
+        if (!$candidates) {
+            $why = [];
+            foreach ($collected['meta'] as $src => $m) {
+                if (!empty($m['error'])) $why[] = "$src: " . mb_substr((string)$m['error'], 0, 60);
+            }
+            logActivity('thumbnail', $n, 'failed', 'No image offered by any source');
+            echo json_encode(['ok'=>false,'ep'=>$n,'error'=>'No image found',
+                              'detail'=>$why ? implode(' · ', array_slice($why, 0, 3)) : 'No source returned an image URL']);
             exit;
         }
+
+        $te  = new RmThumbnailEngine($db);
+        $res = $te->acquire($n, rmYear($n), $candidates);
+
+        if ($res['ok'] && $res['path']) {
+            $te->link($n, $res['path'], $res['url']);
+            @unlink(sys_get_temp_dir().'/rm_stats.json');
+            logActivity('thumbnail', $n, 'success',
+                ($res['skipped'] ? 'Already current' : 'Downloaded') . ' from ' . ($res['source'] ?? '?')
+                . ($res['width'] ? " ({$res['width']}×{$res['height']})" : ''));
+            echo json_encode(['ok'=>true,'ep'=>$n,'path'=>$res['path'],'source'=>$res['source'],
+                              'width'=>$res['width'],'height'=>$res['height'],
+                              'skipped'=>$res['skipped'],'note'=>$res['reason']]);
+            exit;
+        }
+
+        logActivity('thumbnail', $n, 'failed', (string)($res['reason'] ?? 'No usable image'));
+        echo json_encode(['ok'=>false,'ep'=>$n,'error'=>'No usable image',
+                          'detail'=>$res['reason'],
+                          'tried'=>array_map(fn($a) => ($a['source'] ?? '?') . ': ' . ($a['reason'] ?? 'ok'), (array)$res['attempts'])]);
+    } catch (Throwable $e) {
+        logActivity('thumbnail', $n, 'failed', $e->getMessage());
+        echo json_encode(['ok'=>false,'ep'=>$n,'error'=>$e->getMessage()]);
     }
-    logActivity('thumbnail', $n, 'failed', 'No image available');
-    echo json_encode(['ok'=>false,'ep'=>$n,'error'=>'No image found']);
     exit;
 }
 
