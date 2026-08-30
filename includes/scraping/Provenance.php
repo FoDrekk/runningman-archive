@@ -225,6 +225,24 @@ class RmProvenance
         }
     }
 
+    /**
+     * field => source_name for everything already recorded on an episode.
+     * Feeds the diff engine's class-authority guard, which needs to know
+     * where the CURRENT value came from before letting a weaker source
+     * replace it.
+     */
+    public function fieldSources(int $epNum): array
+    {
+        if (!$this->ready()) return [];
+        try {
+            $s = $this->db->prepare('SELECT field_name, source_name FROM episode_field_sources WHERE episode_number=?');
+            $s->execute([$epNum]);
+            $out = [];
+            foreach ($s->fetchAll() as $r) $out[(string)$r['field_name']] = (string)$r['source_name'];
+            return $out;
+        } catch (Throwable $e) { return []; }
+    }
+
     public function recentChanges(int $limit = 100, ?int $runId = null): array
     {
         if (!$this->ready()) return [];

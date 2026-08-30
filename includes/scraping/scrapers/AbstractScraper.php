@@ -48,6 +48,16 @@ abstract class RmScraper
     /** Optional: per-person enrichment (used by Wikidata). */
     public function supportsPersonLookup(): bool { return false; }
 
+    /**
+     * When true, this adapter may read its cache but must not open a
+     * connection. Set by the engine for sources that are in a health
+     * cool-down: their cached data is still good, their servers are
+     * still to be left alone.
+     */
+    protected bool $cacheOnly = false;
+
+    public function setCacheOnly(bool $on): void { $this->cacheOnly = $on; }
+
     protected function http(): RmHttpClient { return RmHttpClient::instance(); }
     protected function cache(): RmCache { return RmCache::instance(); }
 
@@ -98,13 +108,15 @@ abstract class RmScraper
     /** GET with this source's own politeness delay applied. */
     protected function get(string $url, array $opt = []): RmHttpResponse
     {
-        $opt['delay_ms'] = $opt['delay_ms'] ?? $this->delayMs();
+        $opt['delay_ms']   = $opt['delay_ms'] ?? $this->delayMs();
+        $opt['cache_only'] = $opt['cache_only'] ?? $this->cacheOnly;
         return $this->http()->get($url, $opt);
     }
 
     protected function getJson(string $url, array $opt = []): array
     {
-        $opt['delay_ms'] = $opt['delay_ms'] ?? $this->delayMs();
+        $opt['delay_ms']   = $opt['delay_ms'] ?? $this->delayMs();
+        $opt['cache_only'] = $opt['cache_only'] ?? $this->cacheOnly;
         return $this->http()->getJson($url, $opt);
     }
 
@@ -131,6 +143,35 @@ abstract class RmScraper
             '/<meta[^>]+(?:property|name)=["\']' . $k . '["\'][^>]+content=["\']([^"\']+)["\']/i',
             '/<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']' . $k . '["\']/i',
         ]);
+    }
+
+    /**
+     * Pull an episode title out of a page, weighing the evidence.
+     *
+     * og:title is metadata the site itself scoped to this URL, so it is
+     * accepted on its own. A bare <h1> is just the largest text on
+     * whatever page came back — a maintenance notice, an error, a
+     * listing — so it is accepted ONLY when it names this episode.
+     * Without that rule, any page a source serves in place of the real
+     * one gets canonicalised into a plausible-looking episode title.
+     */
+    protected function episodeTitleCandidate(string $html, int $epNum): ?string
+    {
+        $og = $this->meta($html, 'og:title');
+        if ($og !== null && trim($og) !== '') return $og;
+
+        $h1 = $this->firstMatch($html, [
+            '/<h1[^>]*>([^<]{5,150})<\/h1>/i',
+            '/<h1[^>]*>\s*<[^>]+>\s*([^<]{5,150})/i',
+        ]);
+        if ($h1 === null) return null;
+        return $this->mentionsEpisode($h1, $epNum) ? $h1 : null;
+    }
+
+    /** Does this text identify the episode — "810", "#810", "Ep. 810", "810회"? */
+    protected function mentionsEpisode(string $text, int $epNum): bool
+    {
+        return (bool)preg_match('/(?<!\d)0*' . $epNum . '(?!\d)/u', $text);
     }
 
     /** Load HTML into DOMXPath without letting libxml warnings escape. */

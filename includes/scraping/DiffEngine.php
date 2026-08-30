@@ -129,6 +129,9 @@ class RmDiffEngine
     /**
      * Data-safety guards. Each returns a reason so the refusal shows up
      * in the change log instead of vanishing.
+     *
+     * @param array $opt  may carry 'existing_sources' => [field => source],
+     *                    the provenance of what is already stored
      */
     private function guard(string $field, $old, $new, array $r, array $opt): array
     {
@@ -136,6 +139,26 @@ class RmDiffEngine
         $deny  = fn(string $why)         => ['allow' => false, 'reason' => $why];
 
         if (!$this->isPresent($new)) return $deny("Refused: new $field is empty and the existing value is valid");
+
+        // ── Class authority ──────────────────────────────────────
+        // A METADATA source may fill a gap, but it may not overwrite a
+        // value a PRIMARY or SECONDARY source already supplied. Without
+        // this, one day when the broadcaster is unreachable, whatever
+        // weaker source happens to answer silently replaces the
+        // authoritative record — and nothing about that looks wrong.
+        $newSource      = $r['source'] ?? null;
+        $existingSource = $opt['existing_sources'][$field] ?? null;
+        if ($newSource !== null && $existingSource !== null && $existingSource !== $newSource) {
+            $newRank = rmScrapeSourceRank($newSource);
+            $oldRank = rmScrapeSourceRank($existingSource);
+            if ($newRank < $oldRank) {
+                return $deny(sprintf(
+                    'Refused: %s is a %s source and cannot overwrite a %s value recorded from %s',
+                    $newSource, rmScrapeSourceClass($newSource),
+                    rmScrapeSourceClass($existingSource), $existingSource
+                ));
+            }
+        }
 
         switch ($field) {
             case 'title':

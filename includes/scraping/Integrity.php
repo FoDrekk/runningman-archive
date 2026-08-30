@@ -201,12 +201,30 @@ class RmGuestResolver
             $id = $s->fetchColumn();
             if ($id) return ['guest_id'=>(int)$id,'created'=>false,'matched'=>'exact','review'=>null];
 
-            // 2. alias table
+            // 2. alias table — but only if the guest it points at still
+            // EXISTS. An alias outlives the guest it was created for
+            // whenever someone deletes a guest in Admin, and a dangling
+            // alias is worse than no alias: resolve() hands back an id
+            // that no longer exists, the INSERT IGNORE into
+            // episode_guests hits a foreign-key failure that IGNORE
+            // swallows, and the guest silently never attaches to any
+            // episode again. The JOIN makes that impossible; the DELETE
+            // stops the stale row being consulted a second time.
             if ($this->aliasReady()) {
-                $s = $this->db->prepare('SELECT guest_id FROM guest_aliases WHERE alias_key = ? AND guest_id IS NOT NULL LIMIT 1');
+                $s = $this->db->prepare(
+                    'SELECT a.guest_id FROM guest_aliases a
+                       JOIN guests g ON g.guest_id = a.guest_id
+                      WHERE a.alias_key = ? LIMIT 1'
+                );
                 $s->execute([$key]);
                 $id = $s->fetchColumn();
                 if ($id) return ['guest_id'=>(int)$id,'created'=>false,'matched'=>'alias','review'=>null];
+
+                $this->db->prepare(
+                    'DELETE FROM guest_aliases
+                      WHERE alias_key = ? AND guest_id IS NOT NULL
+                        AND guest_id NOT IN (SELECT guest_id FROM guests)'
+                )->execute([$key]);
             }
 
             // 3. identity key across existing guests. Narrow the scan with a
@@ -230,6 +248,10 @@ class RmGuestResolver
             // Create — a new person, not a merge.
             $this->db->prepare('INSERT INTO guests (name_romanized) VALUES (?)')->execute([$name]);
             $newId = (int)$this->db->lastInsertId();
+            if ($newId <= 0) {
+                return ['guest_id'=>null,'created'=>false,'matched'=>null,
+                        'review'=>"Could not create guest \"$name\" — the insert returned no id"];
+            }
             if ($this->aliasReady()) $this->recordAlias($key, $name, $newId, 'auto', $source);
 
             $review = null;

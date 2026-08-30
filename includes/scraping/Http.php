@@ -57,6 +57,7 @@ class RmHttpClient
     const CLASS_REDIRECT     = 'redirect_loop';
     const CLASS_ROBOTS       = 'robots_denied';
     const CLASS_PROXY        = 'proxy_blocked';      // a proxy/gateway refused the tunnel
+    const CLASS_COOLING_DOWN = 'cooling_down';       // suppressed by source health, not attempted
     const CLASS_NO_CURL      = 'curl_missing';
     const CLASS_OTHER        = 'unknown_failure';
 
@@ -107,6 +108,18 @@ class RmHttpClient
                 $r->ok = true; $r->status = 200; $r->body = $hit; $r->fromCache = true;
                 return $r;
             }
+        }
+
+        // cache_only: the caller has decided this source must not be
+        // contacted right now — it is in a health cool-down. Cached data
+        // is still perfectly usable, so the check sits HERE, after the
+        // cache lookup and before the socket, rather than at source
+        // selection where it would discard the cache too.
+        if (!empty($opt['cache_only'])) {
+            $r->errorClass = self::CLASS_COOLING_DOWN;
+            $r->error = 'Not contacted — source is in a health cool-down and nothing is cached for this request';
+            $this->lastError = $r->error;
+            return $r;
         }
 
         if (!function_exists('curl_init')) {

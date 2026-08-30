@@ -36,17 +36,15 @@ $action = $_GET['a'] ?? null;
 // ── AJAX: install the scraping tables ─────────────────────────
 if ($action === 'install') {
     try {
-        $sql = @file_get_contents(__DIR__ . '/../database/scraping_engine.sql');
-        if (!$sql) rmJson(['ok' => false, 'error' => 'Could not read database/scraping_engine.sql']);
-        $db = getDB();
-        // Split on statement boundaries; the file is plain DDL with no
-        // procedures, so a simple semicolon split is safe here.
-        foreach (array_filter(array_map('trim', explode(";\n", $sql))) as $stmt) {
-            if ($stmt === '' || str_starts_with($stmt, '--')) continue;
-            $db->exec($stmt);
-        }
+        $result = rmRunSqlFile(getDB(), __DIR__ . '/../database/scraping_engine.sql');
         rmScrapingTablesExist(true);
-        rmJson(['ok' => rmScrapingTablesExist(), 'tables' => rmScrapingTableStatus()]);
+        $ready = rmScrapingTablesExist();
+        rmJson([
+            'ok'       => $ready && $result['ok'],
+            'executed' => $result['executed'],
+            'error'    => $result['errors'] ? implode(' · ', array_slice($result['errors'], 0, 3)) : null,
+            'tables'   => rmScrapingTableStatus(),
+        ]);
     } catch (Throwable $e) {
         rmJson(['ok' => false, 'error' => $e->getMessage()]);
     }

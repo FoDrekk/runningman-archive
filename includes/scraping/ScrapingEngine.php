@@ -99,11 +99,15 @@ class RmScrapingEngine
             'bypass_cache' => !empty($opt['bypass_cache']),
         ];
 
+        // Selection ignores health: a source in a cool-down is still worth
+        // ASKING, because its answer may already be cached. What the
+        // cool-down forbids is opening a connection to it, and that is
+        // enforced per-request below.
         $sources = !empty($opt['sources'])
-            ? array_values(array_filter((array)$opt['sources'], fn($s) => $this->registry->usable($s, !empty($opt['ignore_health']))))
+            ? array_values(array_filter((array)$opt['sources'], fn($s) => $this->registry->usable($s, true)))
             : ($wantFields
-                ? $this->registry->sourcesForFields($wantFields, !empty($opt['ignore_health']))
-                : array_keys($this->registry->active(!empty($opt['ignore_health']))));
+                ? $this->registry->sourcesForFields($wantFields, true)
+                : array_keys($this->registry->active(true)));
 
         $payloads = []; $meta = [];
 
@@ -111,6 +115,9 @@ class RmScrapingEngine
             $adapter = $this->registry->get($name);
             if (!$adapter) continue;
             if (!$adapter->fields()) continue;   // enrichment-only source (Wikidata)
+
+            $suppressed = empty($opt['ignore_health']) && $this->health->isSuppressed($name);
+            $adapter->setCacheOnly($suppressed);
 
             $t0 = microtime(true);
             try {
@@ -124,6 +131,15 @@ class RmScrapingEngine
 
             $status = (string)($data['_status'] ?? 'unknown');
             $fields = array_values(array_filter(array_keys($data), fn($k) => !str_starts_with($k, '_')));
+
+            // A suppressed source that produced nothing was never asked;
+            // say that, rather than reporting a fetch failure it did not
+            // actually suffer.
+            if ($suppressed && !$fields) {
+                $status = 'suppressed';
+                $data['_error'] = 'In a health cool-down and nothing cached for this episode — not contacted';
+                $data['_error_class'] = RmHttpClient::CLASS_COOLING_DOWN;
+            }
 
             $meta[$name] = [
                 'status'  => $status,
@@ -149,7 +165,13 @@ class RmScrapingEngine
                 in_array($status, ['empty','missing_episode','not_applicable','disabled'], true) => 'empty',
                 default                                 => 'failure',
             };
-            if ($status !== 'disabled' && $status !== 'not_applicable') {
+            if ($suppressed) {
+                // Not contacted, so this run learned nothing about the
+                // source's health either way. Leave the cool-down to
+                // elapse on its own rather than clearing it on the
+                // strength of a cached read.
+                $meta[$name]['suppressed'] = true;
+            } elseif ($status !== 'disabled' && $status !== 'not_applicable') {
                 $this->health->record($name, $outcome, [
                     'error_class'    => $data['_error_class'] ?? null,
                     'error'          => $data['_error'] ?? null,
@@ -169,7 +191,9 @@ class RmScrapingEngine
             ]);
 
             $line = $outcome === 'success'
-                ? 'fetched (' . implode(', ', $fields) . ')' . (!empty($data['_cached']) ? ' [cache]' : '')
+                ? 'fetched (' . implode(', ', $fields) . ')'
+                  . (!empty($data['_cached']) ? ' [cache]' : '')
+                  . ($suppressed ? ' [cooling down — served from cache, not contacted]' : '')
                 : ($data['_error'] ?? $status);
             $this->log('source.' . $outcome, $line,
                 ['episode'=>$epNum,'source'=>$name,'ms'=>(int)($data['_ms'] ?? 0),
@@ -204,7 +228,7 @@ class RmScrapingEngine
                     : 'Disabled in config/scraping.php';
                 $meta[$name] = ['status'=>'disabled','url'=>null,'error'=>$reason,
                                 'class'=>'not_configured','http'=>null,'ms'=>0,'fields'=>[],'cached'=>false,'version'=>$a->parserVersion()];
-            } elseif ($this->health->isSuppressed($name)) {
+            } elseif (empty($opt['ignore_health']) && $this->health->isSuppressed($name)) {
                 $h = $this->health->get($name);
                 $meta[$name] = ['status'=>'suppressed','url'=>null,
                                 'error'=>'In an automatic cool-down until ' . ($h['suppressed_until'] ?? '?')
@@ -280,6 +304,11 @@ class RmScrapingEngine
         ]);
         // Restrict to the fields we actually set out to fill.
         $resolved = array_intersect_key($resolved, array_flip($wanted));
+
+        // Tell the diff engine WHERE the current values came from, so it
+        // can stop a weaker class of source from overwriting a stronger
+        // one's work.
+        $opt['existing_sources'] = $this->prov->fieldSources($epNum);
 
         $diff = $this->differ->diff($existing, $resolved, $opt);
 
