@@ -174,9 +174,11 @@ class RmValidator
         if (self::looksLikeNav($loc['name'])) return self::fail('Location looks like navigation text');
         if (mb_strlen($loc['name']) > 120) return self::fail('Location name too long');
         // The VALUE is the canonical name — the same shape the episodes
-        // table stores — so comparison, diffing and writing all agree.
-        // The derived city/country/overseas parts ride along separately
-        // for the writer, which uses them only to fill blanks.
+        // table stores — so comparison, diffing and writing all agree on
+        // one representation. The derived city/country/overseas parts are
+        // returned alongside for callers that want them; the writer
+        // re-derives them from the name and uses them only to fill blanks
+        // on an existing locations row, never to overwrite one.
         return self::ok($loc['name'], ['parts' => $loc]);
     }
 
