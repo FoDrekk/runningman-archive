@@ -38,8 +38,32 @@ if (isset($_GET['a'])) {
     if ($_GET['a'] === 'scrape' && isset($_GET['ep'])) {
         $n = (int)$_GET['ep'];
         $d = rmScrapeEpisode($n);
-        logActivity('fetch', $n, $d ? 'success' : 'failed', $d ? ('Scraped from '.($d['source']??'unknown')) : 'No data found');
-        echo json_encode($d ?? ['error' => 'No data found']);
+
+        // Keep the response to what the form needs, plus a compact
+        // per-field confidence map so the operator can see which values
+        // several sources agreed on and which rest on a single weak one
+        // before saving them.
+        $conf = [];
+        foreach ((array)($d['_resolved'] ?? []) as $field => $r) {
+            if (($r['value'] ?? null) === null) continue;
+            $conf[$field] = ['confidence' => $r['confidence'] ?? null,
+                             'source'     => $r['source'] ?? null,
+                             'agreed_by'  => $r['sources'] ?? []];
+        }
+        $failed = [];
+        foreach ((array)($d['_meta'] ?? []) as $src => $m) {
+            if (!empty($m['error']) && ($m['status'] ?? '') !== 'skipped') {
+                $failed[$src] = mb_substr((string)$m['error'], 0, 120);
+            }
+        }
+        unset($d['_resolved'], $d['_meta']);
+        $d['confidence']     = $conf;
+        $d['source_failures']= $failed;
+
+        $hasData = !empty($d['synopsis']) || !empty($d['air_date']) || !empty($d['guests']);
+        logActivity('fetch', $n, $hasData ? 'success' : 'failed',
+            $hasData ? ('Scraped from ' . ($d['source'] ?? 'unknown')) : 'No usable data from any source');
+        echo json_encode($d);
         exit;
     }
 
@@ -98,10 +122,16 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['save'])) {
                ->execute([$n,$yrId,$title,trim($_POST['date']??'')?:null,trim($_POST['synopsis']??'')?:null,$tid?:null]);
             $eid=(int)$db->lastInsertId();
             if ($tid) $db->prepare("UPDATE episodes SET thumbnail_id=? WHERE episode_id=?")->execute([$tid,$eid]);
+            // Guest identity goes through the resolver, so an alternate
+            // spelling attaches to the existing person rather than
+            // creating a second row for the same guest. A name that is
+            // merely SIMILAR to an existing one is still created, but
+            // flagged for review — it is not merged on a guess.
+            $guestResolver = new RmGuestResolver($db);
             foreach (array_filter(array_map('trim',explode("\n",$_POST['guests']??''))) as $gn) {
-                $g=$db->prepare("SELECT guest_id FROM guests WHERE name_romanized=?"); $g->execute([$gn]); $gid=$g->fetchColumn();
-                if (!$gid){$db->prepare("INSERT INTO guests (name_romanized) VALUES (?)")->execute([$gn]);$gid=(int)$db->lastInsertId();}
-                $db->prepare("INSERT IGNORE INTO episode_guests (episode_id,guest_id) VALUES (?,?)")->execute([$eid,$gid]);
+                $gr = $guestResolver->resolve($gn, $n, 'manual');
+                if (!$gr['guest_id']) continue;
+                $db->prepare("INSERT IGNORE INTO episode_guests (episode_id,guest_id) VALUES (?,?)")->execute([$eid,(int)$gr['guest_id']]);
             }
             $db->prepare("UPDATE years SET total_eps=(SELECT COUNT(*) FROM episodes WHERE year_id=?) WHERE year_id=?")->execute([$yrId,$yrId]);
             $db->commit();

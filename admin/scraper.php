@@ -190,6 +190,65 @@ if ($action === 'verify_thumbs') {
     }
 }
 
+// ── AJAX: archive-wide integrity sweep ────────────────────────
+// Looks for possible duplicates across the WHOLE archive (shared air
+// dates, identical normalised titles) and raises them for review.
+// Nothing is merged or deleted — a two-part special legitimately shares
+// an air date, so this is a human's decision every time.
+if ($action === 'integrity') {
+    set_time_limit(120);
+    try {
+        $dup   = new RmDuplicateDetector();
+        $found = $dup->scanAll(300);
+        $prov  = new RmProvenance();
+        $raised = 0;
+        foreach ($found as $f) {
+            $eps = array_map('intval', explode(',', (string)$f['episodes']));
+            $prov->flag('duplicate_episode', 'episode', null, $eps[0] ?? null,
+                ucfirst(str_replace('_', ' ', (string)$f['type'])) . ' "' . mb_substr((string)$f['key'], 0, 80) . '" — EP' .
+                implode(', EP', $eps) . '. ' . $f['note'] . ' Not merged or deleted: review manually.');
+            $raised++;
+        }
+        rmJson(['ok' => true, 'found' => count($found), 'raised' => $raised, 'items' => array_slice($found, 0, 40)]);
+    } catch (Throwable $e) {
+        rmJson(['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
+// ── AJAX: enrich guest records from Wikidata ──────────────────
+// Fills BLANK name_korean / profession / nationality only. An editor's
+// existing value is never overwritten by a lookup, and a name without a
+// confident Wikidata match is left alone rather than guessed at.
+if ($action === 'enrich_guests') {
+    set_time_limit(180);
+    try {
+        $db    = getDB();
+        $limit = max(1, min(100, (int)($_GET['limit'] ?? 25)));
+        $rows  = $db->query(
+            "SELECT guest_id, name_romanized FROM guests
+              WHERE (name_korean IS NULL OR name_korean = '')
+                 OR (profession IS NULL OR profession = '')
+              ORDER BY guest_id LIMIT $limit"
+        )->fetchAll();
+
+        $gr = new RmGuestResolver($db);
+        $enriched = 0; $skipped = 0; $details = [];
+        foreach ($rows as $g) {
+            $r = $gr->enrich((int)$g['guest_id'], (string)$g['name_romanized']);
+            if (!empty($r['changed'])) {
+                $enriched++;
+                $details[] = $g['name_romanized'] . ' → ' . implode(', ', $r['changed']);
+            } else {
+                $skipped++;
+            }
+        }
+        rmJson(['ok' => true, 'checked' => count($rows), 'enriched' => $enriched,
+                'skipped' => $skipped, 'details' => array_slice($details, 0, 25)]);
+    } catch (Throwable $e) {
+        rmJson(['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
 // ── AJAX: activity log tail ───────────────────────────────────
 if ($action === 'log') {
     try {
@@ -399,6 +458,8 @@ CSS;
   </div>
   <div class="ar">
     <button class="btn btn-sm btn-dark" onclick="if(confirm('Full rescan re-checks every episode in the batch window. Continue?'))act('run',{mode:'full',from:v('rFrom'),to:v('rTo')},this)">🔁 Full Rescan (windowed)</button>
+    <button class="btn btn-sm btn-dark" onclick="integrityScan(this)">🔍 Integrity Scan</button>
+    <button class="btn btn-sm btn-dark" onclick="enrichGuests(this)">👤 Enrich Guest Records</button>
     <button class="btn btn-sm btn-ghost" onclick="act('flush_cache',{},this)">🧹 Clear Cache &amp; Cool-downs</button>
     <button class="btn btn-sm btn-ghost" onclick="selfTest(this)">🧪 Engine Self-Test</button>
   </div>
@@ -611,6 +672,37 @@ function selfTest(btn){
         (fails.length ? '<div class="sc-log" style="margin-top:.5rem">' + fails.map(function(f){
           return '[' + esc(f.group) + '] ' + esc(f.name) + '\n    expected ' + esc(f.expected) + ', got ' + esc(f.actual);
         }).join('\n') + '</div>' : '') + '</div></div>');
+  }).catch(function(e){ busy(btn,false); out('<div class="alert alert-err">' + esc(e.message) + '</div>'); });
+}
+
+function integrityScan(btn){
+  busy(btn,true);
+  out('<div class="sc-meta">Scanning the archive for possible duplicates… <span class="spin"></span></div>');
+  fetch('scraper.php?a=integrity').then(function(r){ return r.json(); }).then(function(d){
+    busy(btn,false);
+    if (!d.ok) { out('<div class="alert alert-err">' + esc(d.error) + '</div>'); return; }
+    var rows = (d.items||[]).map(function(i){
+      return '<tr><td>' + esc(String(i.type).replace(/_/g,' ')) + '</td><td>' + esc(String(i.key).slice(0,70)) +
+             '</td><td>EP' + esc(String(i.episodes).split(',').join(', EP')) + '</td><td class="sc-meta">' + esc(i.note) + '</td></tr>';
+    }).join('');
+    out('<div class="alert ' + (d.found ? 'alert-warn' : 'alert-ok') + '"><div>' +
+        (d.found ? d.found + ' possible duplicate group(s) found and raised for review — <strong>nothing was merged or deleted</strong>.' +
+          '<table class="atable" style="margin-top:.6rem"><thead><tr><th>Type</th><th>Value</th><th>Episodes</th><th>Note</th></tr></thead><tbody>' + rows + '</tbody></table>'
+          : 'No duplicate episodes detected.') + '</div></div>');
+  }).catch(function(e){ busy(btn,false); out('<div class="alert alert-err">' + esc(e.message) + '</div>'); });
+}
+
+function enrichGuests(btn){
+  busy(btn,true);
+  out('<div class="sc-meta">Looking up guest identities on Wikidata… <span class="spin"></span></div>');
+  fetch('scraper.php?a=enrich_guests&limit=25').then(function(r){ return r.json(); }).then(function(d){
+    busy(btn,false);
+    if (!d.ok) { out('<div class="alert alert-err">' + esc(d.error) + '</div>'); return; }
+    out('<div class="alert alert-ok"><div>Checked ' + d.checked + ' guest record(s): ' + d.enriched + ' enriched, ' +
+        d.skipped + ' left unchanged (no confident match, or already complete).' +
+        (d.details && d.details.length ? '<div class="sc-log" style="margin-top:.5rem;max-height:180px">' + d.details.map(esc).join('\n') + '</div>' : '') +
+        '<div class="sc-meta" style="margin-top:.4rem">Only blank fields are filled — an existing value is never overwritten by a lookup.</div>' +
+        '</div></div>');
   }).catch(function(e){ busy(btn,false); out('<div class="alert alert-err">' + esc(e.message) + '</div>'); });
 }
 

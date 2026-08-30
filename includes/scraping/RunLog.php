@@ -117,8 +117,12 @@ class RmScrapeRun
     public function finish(string $status = 'completed', string $notes = ''): array
     {
         $durMs = (int)round((microtime(true) - $this->started) * 1000);
-        if ($this->counts['failed'] > 0 && $this->counts['checked'] > $this->counts['failed'] && $status === 'completed') {
-            $status = 'partial';   // some episodes worked, some didn't — say so honestly
+        if ($status === 'completed' && $this->counts['failed'] > 0) {
+            // Any failure means the run did not do its whole job. If NOTHING
+            // succeeded, it did not do its job at all — reporting either as
+            // "completed" is how a broken nightly run goes unnoticed.
+            $progress = $this->counts['added'] + $this->counts['updated'] + $this->counts['skipped'];
+            $status = $progress > 0 ? 'partial' : 'failed';
         }
         if ($this->ready() && $this->id) {
             try {

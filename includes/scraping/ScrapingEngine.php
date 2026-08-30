@@ -142,6 +142,10 @@ class RmScrapingEngine
             $outcome = match (true) {
                 $status === 'ok' && $fields !== []      => 'success',
                 $status === 'parser_warning'            => 'parser_warning',
+                // Reached the source but parsed nothing: a parser problem,
+                // not a transport failure. Calling it a failure would hide
+                // the one signal that says "our selectors are stale".
+                $status === 'ok'                        => 'parser_warning',
                 in_array($status, ['empty','missing_episode','not_applicable','disabled'], true) => 'empty',
                 default                                 => 'failure',
             };
@@ -185,13 +189,34 @@ class RmScrapingEngine
             }
         }
 
-        // Sources that were skipped because they can't help with these fields.
-        foreach ($this->registry->active() as $name => $a) {
-            if (!isset($meta[$name]) && $a->fields()) {
+        // Account for every registered source, so the report never leaves
+        // one silently unexplained. Three distinct reasons to not contact
+        // a source, and they must not look alike:
+        //   suppressed  — in an automatic health cool-down
+        //   disabled    — switched off in config, or missing its API key
+        //   skipped     — simply not needed for the fields being filled
+        foreach ($this->registry->all() as $name => $a) {
+            if (isset($meta[$name]) || !$a->fields()) continue;
+
+            if (!$a->isEnabled()) {
+                $reason = in_array($name, ['tmdb','tvdb'], true)
+                    ? 'No API key configured — optional source, skipped at no cost'
+                    : 'Disabled in config/scraping.php';
+                $meta[$name] = ['status'=>'disabled','url'=>null,'error'=>$reason,
+                                'class'=>'not_configured','http'=>null,'ms'=>0,'fields'=>[],'cached'=>false,'version'=>$a->parserVersion()];
+            } elseif ($this->health->isSuppressed($name)) {
+                $h = $this->health->get($name);
+                $meta[$name] = ['status'=>'suppressed','url'=>null,
+                                'error'=>'In an automatic cool-down until ' . ($h['suppressed_until'] ?? '?')
+                                       . ' after repeated failures (' . ($h['last_error'] ?? 'no detail') . ')',
+                                'class'=>'cooling_down','http'=>null,'ms'=>0,'fields'=>[],'cached'=>false,'version'=>$a->parserVersion()];
+                $this->log('source.suppressed', 'skipped while cooling down after repeated failures',
+                           ['episode'=>$epNum,'source'=>$name,'level'=>'warning']);
+            } else {
                 $meta[$name] = ['status'=>'skipped','url'=>null,'error'=>'Not needed for the requested fields',
                                 'class'=>null,'http'=>null,'ms'=>0,'fields'=>[],'cached'=>false,'version'=>$a->parserVersion()];
-                $this->tally('src_skipped');
             }
+            $this->tally('src_skipped');
         }
 
         return ['payloads' => $payloads, 'meta' => $meta];
@@ -225,8 +250,25 @@ class RmScrapingEngine
 
         $collected = $this->collect($epNum, $wanted, $opt);
         if (!$collected['payloads']) {
+            // Name the actual obstacle. "No data" is not a diagnosis, and
+            // "every source is in a cool-down" needs a completely different
+            // response from "this episode isn't covered anywhere".
+            $byStatus = [];
+            foreach ($collected['meta'] as $m) $byStatus[$m['status']] = ($byStatus[$m['status']] ?? 0) + 1;
+            $contacted = array_sum(array_diff_key($byStatus, array_flip(['skipped','disabled','suppressed'])));
+            $reason = match (true) {
+                ($byStatus['suppressed'] ?? 0) > 0 && $contacted === 0 =>
+                    'Every usable source is in an automatic cool-down after repeated failures — clear cool-downs in the Scraper Control Centre once the cause is fixed',
+                ($byStatus['parser_warning'] ?? 0) > 0 =>
+                    'Sources were reachable but produced no fields — their page structure may have changed (' . ($byStatus['parser_warning']) . ' affected)',
+                ($byStatus['fetch_failed'] ?? 0) > 0 && $contacted === ($byStatus['fetch_failed'] ?? 0) =>
+                    'No source could be reached — check network connectivity and source health',
+                ($byStatus['missing_episode'] ?? 0) > 0 =>
+                    'No source lists this episode yet',
+                default => 'No source returned usable data for this episode',
+            };
             return ['episode'=>$epNum,'skipped'=>false,'failed'=>true,
-                    'reason'=>'No source returned usable data for this episode',
+                    'reason'=>$reason,
                     'is_new'=>$isNew,'changes'=>[],'apply'=>[],'resolved'=>[],'meta'=>$collected['meta'],
                     'warnings'=>[['field'=>'*','type'=>'no_data','message'=>'Every source failed or had nothing — existing data left untouched']],
                     'summary'=>['total_applied'=>0],'existing'=>$existing];

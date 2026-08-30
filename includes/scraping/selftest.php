@@ -152,6 +152,28 @@ function rmScrapingSelfTest(): array
     $check('titles', 'index page becomes placeholder', RmNormalizer::title('Episodes - Page 4', 810), 'Episode #810');
     $check('titles', 'equivalent titles share a key', RmNormalizer::titleKey('Episode #810 - Jeju Trip') === RmNormalizer::titleKey('Episode #810 - jeju trip'), true);
 
+    // ── Parser-break detection ────────────────────────────────
+    // The most dangerous failure mode in the whole system: a source
+    // answers HTTP 200, its markup has changed, and it parses to
+    // nothing. If that reports as "ok", every downstream guard is told
+    // the source is healthy. It must report as a PARSER WARNING.
+    $cache = RmCache::instance();
+    $probeEp = 999001;
+    $cache->set('http:mrm:ep:' . $probeEp,
+        '<html><body>Home | Episodes | Guests | Sign in</body></html>' . str_repeat(' ', 600), 60, 'page');
+    $broken = (new MyRunningManScraper())->episode($probeEp);
+    $check('parser', 'HTTP 200 with nothing parsed is a parser warning', $broken['_status'] ?? null, 'parser_warning');
+    $check('parser', 'and it is not reported as OK',                    ($broken['_error_class'] ?? null) === RmHttpClient::CLASS_OK, false);
+    $check('parser', 'and it carries an explanation',                   !empty($broken['_error']), true);
+
+    $cache->set('http:mrm:ep:' . $probeEp,
+        '<html><head><meta property="og:description" content="The members race across Seoul in a hidden-identity mission that runs into the night."></head>'
+        . '<body><div>Location: Seoul</div></body></html>' . str_repeat(' ', 600), 60, 'page');
+    $working = (new MyRunningManScraper())->episode($probeEp);
+    $check('parser', 'a page that does parse reports ok',               $working['_status'] ?? null, 'ok');
+    $check('parser', 'and yields real fields',                          !empty($working['synopsis']) && !empty($working['location']), true);
+    $cache->forget('http:mrm:ep:' . $probeEp);
+
     // ── Registry / config wiring ──────────────────────────────
     $reg = RmSourceRegistry::instance();
     $check('registry', 'every configured source has an adapter',

@@ -76,12 +76,20 @@ abstract class RmScraper
             if ($v === null || $v === '' || $v === []) continue;   // absent, not empty
             $clean[$k] = $v;
         }
+        // Decide emptiness from the PARSED FIELDS ALONE, before any meta
+        // key is added — otherwise _url alone makes every result look
+        // populated, and a page whose markup changed reports itself
+        // healthy while supplying nothing.
+        $hasFields = $clean !== [];
+
         $clean['_url']         = $url;
-        $clean['_status']      = $clean ? $status : 'empty';
+        $clean['_status']      = $hasFields ? $status : 'parser_warning';
+        $clean['_parser_note'] = $hasFields ? null
+            : 'Fetched successfully (' . $res->length() . ' bytes) but no expected field could be parsed — the page structure may have changed';
         $clean['_http']        = $res->status;
         $clean['_ms']          = $res->ms;
-        $clean['_error']       = null;
-        $clean['_error_class'] = RmHttpClient::CLASS_OK;
+        $clean['_error']       = $clean['_parser_note'];
+        $clean['_error_class'] = $hasFields ? RmHttpClient::CLASS_OK : 'parser_failure';
         $clean['_hash']        = $res->body !== null ? sha1($res->body) : null;
         $clean['_cached']      = $res->fromCache;
         return $clean;
