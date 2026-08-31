@@ -122,7 +122,8 @@ class RmSourceHealth
             $succ   = (int)$h['success_count'];
             $fail   = (int)$h['failure_count'];
 
-            if ($class === RmHttpClient::CLASS_BLOCKED
+            if ($class === RmHttpClient::CLASS_OFFLINE)            $status = self::UNKNOWN;
+            elseif ($class === RmHttpClient::CLASS_BLOCKED
                 || $class === RmHttpClient::CLASS_PROXY)           $status = self::BLOCKED;
             elseif ($class === RmHttpClient::CLASS_RATE_LIMITED)   $status = self::RATE_LIMITED;
             elseif ($consec >= 3)                                  $status = self::DOWN;
@@ -185,6 +186,8 @@ class RmSourceHealth
                 'name'            => $name,
                 'label'           => $cfg['label'] ?? $name,
                 'tier'            => (int)($cfg['tier'] ?? 1),
+                'class'           => rmScrapeSourceClass($name),
+                'rank'            => rmScrapeSourceRank($name),
                 'enabled'         => $enabled,
                 'needs_key'       => in_array($name, ['tmdb','tvdb'], true),
                 'status'          => $enabled ? (string)($h['status'] ?? self::UNKNOWN) : 'disabled',

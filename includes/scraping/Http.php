@@ -58,6 +58,7 @@ class RmHttpClient
     const CLASS_ROBOTS       = 'robots_denied';
     const CLASS_PROXY        = 'proxy_blocked';      // a proxy/gateway refused the tunnel
     const CLASS_COOLING_DOWN = 'cooling_down';       // suppressed by source health, not attempted
+    const CLASS_OFFLINE      = 'offline_mode';       // outbound requests disabled (tests/CI)
     const CLASS_NO_CURL      = 'curl_missing';
     const CLASS_OTHER        = 'unknown_failure';
 
@@ -125,6 +126,15 @@ class RmHttpClient
         if (!function_exists('curl_init')) {
             $r->errorClass = self::CLASS_NO_CURL;
             $r->error = 'PHP curl extension not available';
+            $this->lastError = $r->error;
+            return $r;
+        }
+
+        // Offline mode: loopback still works (test fixtures live there),
+        // everything else is refused before a socket is opened.
+        if (rmScrapeConfig('http.offline', false) && !self::isLoopback($url)) {
+            $r->errorClass = self::CLASS_OFFLINE;
+            $r->error = 'Outbound requests are disabled (RM_SCRAPE_OFFLINE) — no live source was contacted';
             $this->lastError = $r->error;
             return $r;
         }
@@ -256,6 +266,13 @@ class RmHttpClient
             }
         }
         return [$data, $res];
+    }
+
+    /** Loopback hosts stay reachable in offline mode so fixtures work. */
+    public static function isLoopback(string $url): bool
+    {
+        $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+        return in_array($host, ['127.0.0.1', 'localhost', '::1', '[::1]'], true);
     }
 
     private function classifyCurl(int $errno, string $msg): array {

@@ -70,8 +70,12 @@ class RmScrapingEngine
      * episode sync is just as traceable as one inside a run — the only
      * difference is that its rows carry a NULL run_id.
      */
+    /** Set for the duration of a read-only observation (the admin trace). */
+    private bool $readOnly = false;
+
     private function log(string $event, string $message = '', array $ctx = []): void
     {
+        if ($this->readOnly) return;
         if ($this->run) $this->run->log($event, $message, $ctx);
         else RmScrapeRun::note($event, $message, $ctx);
     }
@@ -98,6 +102,14 @@ class RmScrapingEngine
             'latest'       => $this->latestKnown,
             'bypass_cache' => !empty($opt['bypass_cache']),
         ];
+
+        // A dry run must leave no trace of data it did not save; a
+        // read-only observation must leave no trace at all, including
+        // health — tracing an episode to diagnose a problem must never
+        // be the thing that puts a source into a cool-down.
+        $readOnly   = !empty($opt['read_only']);
+        $recordProv = !$readOnly && empty($opt['dry_run']);
+        $this->readOnly = $readOnly;
 
         // Selection ignores health: a source in a cool-down is still worth
         // ASKING, because its answer may already be cached. What the
@@ -165,7 +177,9 @@ class RmScrapingEngine
                 in_array($status, ['empty','missing_episode','not_applicable','disabled'], true) => 'empty',
                 default                                 => 'failure',
             };
-            if ($suppressed) {
+            if ($readOnly) {
+                // observed only — nothing recorded
+            } elseif ($suppressed) {
                 // Not contacted, so this run learned nothing about the
                 // source's health either way. Leave the cool-down to
                 // elapse on its own rather than clearing it on the
@@ -180,7 +194,7 @@ class RmScrapingEngine
                 ]);
             }
 
-            $this->prov->recordSource($epNum, $name, [
+            if ($recordProv) $this->prov->recordSource($epNum, $name, [
                 'url'            => $data['_url'] ?? null,
                 'status'         => $status,
                 'http_status'    => $data['_http'] ?? null,
@@ -207,7 +221,7 @@ class RmScrapingEngine
                 $payloads[$name] = $payload;
             }
 
-            if ($status === 'parser_warning') {
+            if ($status === 'parser_warning' && $recordProv) {
                 $this->prov->flag('parser_warning', 'source', null, $epNum,
                     "$name: " . ($data['_error'] ?? 'reachable but produced no fields'));
             }
@@ -358,6 +372,7 @@ class RmScrapingEngine
         $plan['written'] = [];
         $plan['thumbnail'] = null;
 
+        if (!empty($opt['read_only'])) { $plan['dry_run'] = true; $plan['read_only'] = true; return $plan; }
         if (!empty($plan['skipped']) || !empty($plan['failed'])) return $plan;
         if ($this->db === null) { $plan['failed'] = true; $plan['reason'] = 'No database connection'; return $plan; }
 
@@ -715,9 +730,24 @@ class RmScrapingEngine
         return ['summary'=>$this->run->finish('completed'),'results'=>$results,'resumed'=>true];
     }
 
-    /** Dry run: what WOULD change, guaranteed to write nothing. */
+    /** Dry run: what WOULD change. Writes no episode data or provenance. */
     public function dryRun(int $epNum, array $opt = []): array
     {
         return $this->syncEpisode($epNum, $opt + ['dry_run' => true, 'all_fields' => true]);
+    }
+
+    /**
+     * Pure observation for the admin trace: contacts the sources,
+     * computes the entire plan, and writes NOTHING — not episode data,
+     * not provenance, not source health, not a log row. Diagnosing an
+     * episode must never change the archive or the engine's own state.
+     */
+    public function trace(int $epNum, array $opt = []): array
+    {
+        $plan = $this->plan($epNum, $opt + ['read_only' => true, 'dry_run' => true, 'all_fields' => true]);
+        $this->readOnly = false;
+        $plan['dry_run'] = true;
+        $plan['read_only'] = true;
+        return $plan;
     }
 }

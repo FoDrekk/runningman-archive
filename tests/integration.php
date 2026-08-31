@@ -13,6 +13,12 @@
 //
 //   php tests/integration.php [--fresh]
 // ============================================================
+// Hermetic by construction: outbound requests are disabled before the
+// engine is loaded, so this suite can never reach a live source. Test
+// fixtures are served from loopback, which stays permitted.
+putenv('RM_SCRAPE_OFFLINE=1');
+$_ENV['RM_SCRAPE_OFFLINE'] = '1';
+
 require_once __DIR__ . '/../includes/scraper.php';
 require_once __DIR__ . '/../includes/system.php';
 
@@ -214,6 +220,49 @@ check('  → leaves the episode count unchanged', (int)$db->query("SELECT COUNT(
 check('  → writes no change rows', (int)$db->query("SELECT COUNT(*) FROM scrape_changes")->fetchColumn(), $changeBefore);
 check('  → writes no provenance', (int)$db->query("SELECT COUNT(*) FROM episode_field_sources WHERE episode_number=$dryEp")->fetchColumn(), 0);
 check('  → and downloads no thumbnail', ($dry['thumbnail']['ok'] ?? null) !== true, true);
+
+section('phase 3 — the trace observes and writes NOTHING');
+// A diagnostic that mutates the thing it is diagnosing is worse than no
+// diagnostic. The trace must not write episode data, provenance, change
+// rows, log lines, or source health — tracing an episode must never be
+// the thing that puts a source into a cool-down.
+$traceEp = TEST_LO + 10;
+seedEpisode($traceEp);
+$snapshot = fn() => [
+    'episodes'    => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM episodes')->fetchColumn(),
+    'sources'     => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM episode_sources')->fetchColumn(),
+    'fields'      => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM episode_field_sources')->fetchColumn(),
+    'changes'     => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM scrape_changes')->fetchColumn(),
+    'log'         => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM scrape_log')->fetchColumn(),
+    'runs'        => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM scrape_runs')->fetchColumn(),
+    'flags'       => (int)$GLOBALS['db']->query('SELECT COUNT(*) FROM review_flags')->fetchColumn(),
+    'health'      => (int)$GLOBALS['db']->query('SELECT COALESCE(SUM(success_count+failure_count+empty_count),0) FROM source_health')->fetchColumn(),
+];
+$before = $snapshot();
+$trace = $engine->trace($traceEp);
+$after = $snapshot();
+check('the trace produced a plan', count($trace['resolved'] ?? []) > 0, true);
+check('  → and shows per-source detail', count($trace['meta'] ?? []) > 0, true);
+check('  → and reports what it would apply', count($trace['apply'] ?? []) > 0, true);
+check('  → episodes untouched',   $after['episodes'], $before['episodes']);
+check('  → provenance untouched', $after['sources'],  $before['sources']);
+check('  → field sources untouched', $after['fields'], $before['fields']);
+check('  → change log untouched', $after['changes'],  $before['changes']);
+check('  → activity log untouched', $after['log'],    $before['log']);
+check('  → run table untouched',  $after['runs'],     $before['runs']);
+check('  → review flags untouched', $after['flags'],  $before['flags']);
+check('  → source health untouched', $after['health'], $before['health']);
+check('  → and it is marked read-only', !empty($trace['read_only']), true);
+
+section('phase 10 — a dry run records no provenance either');
+$dryProvEp = TEST_LO + 12;
+seedEpisode($dryProvEp);
+$provBefore = (int)$db->query('SELECT COUNT(*) FROM episode_sources')->fetchColumn();
+$engine->dryRun($dryProvEp, ['skip_thumbnail' => true]);
+check('a dry run writes no source provenance',
+      (int)$db->query('SELECT COUNT(*) FROM episode_sources')->fetchColumn(), $provBefore);
+check('  → but it DOES record health, having really contacted the sources',
+      (int)$db->query('SELECT COALESCE(SUM(success_count+failure_count+empty_count),0) FROM source_health')->fetchColumn() > 0, true);
 
 section('phase 10 — then the real sync applies exactly that');
 $wouldApply = array_keys((array)$dry['apply']);

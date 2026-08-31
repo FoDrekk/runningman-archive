@@ -14,6 +14,12 @@
 //
 //   php tests/resolution.php
 // ============================================================
+// Hermetic by construction: outbound requests are disabled before the
+// engine is loaded, so this suite can never reach a live source. Test
+// fixtures are served from loopback, which stays permitted.
+putenv('RM_SCRAPE_OFFLINE=1');
+$_ENV['RM_SCRAPE_OFFLINE'] = '1';
+
 require_once __DIR__ . '/../includes/scraping/bootstrap.php';
 
 $pass = 0; $fail = 0; $skipped = [];

@@ -24,6 +24,11 @@ function rmScrapeDefaultConfig(): array {
     return [
         // ── HTTP behaviour ────────────────────────────────────────
         'http' => [
+            // Offline mode refuses every non-loopback request outright.
+            // Set RM_SCRAPE_OFFLINE=1 for test runs and CI, so the suite
+            // can never reach a real source — deterministic for us, and
+            // no unsolicited traffic for them.
+            'offline'          => false,
             'timeout'          => 15,
             'connect_timeout'  => 8,
             'max_retries'      => 2,       // total attempts = 1 + max_retries
@@ -229,6 +234,9 @@ function rmScrapeConfig(?string $path = null, $default = null) {
             $v = getenv($env);
             if ($v !== false && trim($v) !== '') $cfg['api_keys'][$k] = trim($v);
         }
+
+        $offline = getenv('RM_SCRAPE_OFFLINE');
+        if ($offline !== false && $offline !== '' && $offline !== '0') $cfg['http']['offline'] = true;
     }
 
     if ($path === null) return $cfg;

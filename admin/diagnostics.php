@@ -99,30 +99,74 @@ if (isset($_GET['a']) && $_GET['a'] === 'eptrace') {
     try {
         $engine = new RmScrapingEngine();
         $t0 = microtime(true);
-        // Dry run: contacts every source and computes the full plan, but
-        // is guaranteed not to write anything to the database.
-        $plan = $engine->dryRun($ep, ['bypass_cache' => !empty($_GET['fresh'])]);
+        // Read-only: contacts every source and computes the full plan,
+        // then writes nothing at all — no episode data, no provenance,
+        // no source health, no log rows.
+        $plan = $engine->trace($ep, ['bypass_cache' => !empty($_GET['fresh'])]);
         $ms = (int)round((microtime(true) - $t0) * 1000);
 
         $sources = [];
         foreach ((array)($plan['meta'] ?? []) as $name => $m) {
+            $payload = (array)($plan['payloads'][$name] ?? []);
+
+            // How many values each field yielded — "Guests: 8" is the
+            // number that tells you at a glance whether a parser is
+            // still working, in a way "fields: guests" does not.
+            $counts = [];
+            foreach ($m['fields'] as $f) {
+                $v = $payload[$f] ?? null;
+                $counts[$f] = is_array($v) ? count($v) : ($v === null || $v === '' ? 0 : 1);
+            }
+
+            // Fetch and parse are separate verdicts on purpose: a source
+            // can fetch perfectly and parse nothing, and that combination
+            // is the one worth noticing.
+            $fetched = !in_array($m['status'], ['fetch_failed','blocked','rate_limited','adapter_error','suppressed','disabled'], true);
+            $parser  = match (true) {
+                $m['status'] === 'ok' && $m['fields'] !== [] => 'OK',
+                $m['status'] === 'parser_warning'            => 'WARNING',
+                $m['status'] === 'missing_episode'           => 'N/A — episode not listed',
+                in_array($m['status'], ['disabled','not_applicable','suppressed','skipped'], true) => 'not run',
+                $fetched                                     => 'WARNING',
+                default                                      => 'not reached',
+            };
+
             $sources[$name] = [
+                'source_class' => rmScrapeSourceClass($name),
+                'tier'   => (int)rmScrapeConfig("sources.$name.tier", 1),
                 'status' => $m['status'], 'ms' => $m['ms'], 'http' => $m['http'],
-                'fields' => $m['fields'], 'error' => $m['error'], 'class' => $m['class'],
-                'cached' => $m['cached'], 'url' => $m['url'], 'parser' => $m['version'],
-                'data'   => array_intersect_key((array)($plan['payloads'][$name] ?? []), array_flip($m['fields'])),
+                'fields' => $m['fields'], 'field_counts' => $counts,
+                'error'  => $m['error'], 'class' => $m['class'],
+                'cached' => $m['cached'], 'suppressed' => !empty($m['suppressed']),
+                'url'    => $m['url'], 'parser_version' => $m['version'],
+                'fetch'  => $fetched ? 'OK' : 'FAILED',
+                'parser' => $parser,
+                'data'   => array_intersect_key($payload, array_flip($m['fields'])),
             ];
         }
 
         $resolution = [];
         foreach ((array)($plan['resolved'] ?? []) as $field => $r) {
+            $value = $r['value'] ?? null;
+            // What each source OFFERED, before resolution — so the
+            // normalisation step is visible: "Seoul, South Korea" and
+            // "Seoul City" arriving as two strings and agreeing as one
+            // value is the interesting part.
+            $offered = [];
+            foreach ((array)($plan['payloads'] ?? []) as $src => $payload) {
+                if (!array_key_exists($field, $payload)) continue;
+                $raw = $payload[$field];
+                $offered[$src] = is_array($raw) ? implode(', ', array_map('strval', $raw)) : (string)$raw;
+            }
             $resolution[$field] = [
-                'value'      => is_array($r['value'] ?? null) ? implode(', ', array_map('strval', $r['value'])) : ($r['value'] ?? null),
+                'value'      => is_array($value) ? implode(', ', array_map('strval', $value)) : $value,
+                'count'      => is_array($value) ? count($value) : ($value === null || $value === '' ? 0 : 1),
                 'source'     => $r['source'] ?? null,
                 'agreed_by'  => $r['sources'] ?? [],
                 'confidence' => $r['confidence'] ?? null,
                 'conflicts'  => $r['conflicts'] ?? [],
-                'rejected'   => $r['rejected'] ?? [],
+                'rejected'   => $r['rejected'] ?? [],   // validation refusals, with reasons
+                'offered'    => $offered,               // pre-normalisation input
             ];
         }
 
@@ -137,6 +181,8 @@ if (isset($_GET['a']) && $_GET['a'] === 'eptrace') {
             'changes'    => array_map([RmDiffEngine::class, 'renderLine'],
                                 array_values(array_filter((array)($plan['changes'] ?? []), fn($c) => $c['type'] !== 'unchanged'))),
             'warnings'   => array_column((array)($plan['warnings'] ?? []), 'message'),
+            'applied'    => (int)($plan['summary']['total_applied'] ?? 0),
+            'dry_run'    => true,
             'note'       => 'Dry run — no database changes were made.',
         ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Throwable $e) {
@@ -539,33 +585,62 @@ async function runEpTrace(){
 
     var html='<div style="font-size:.78rem;color:rgba(255,255,255,.4)">Episode '+d.episode+' → year '+d.year_used
       +' · '+d.total_ms+'ms total · '+(d.is_new?'not yet in the database':'already in the database')
-      +' · <span style="color:#86efac">'+h(d.note)+'</span></div>';
+      +' · <span style="color:#86efac">'+h(d.note)+'</span>'
+      +' <span style="color:rgba(255,255,255,.3)">(would apply '+(d.applied|0)+' field'+((d.applied|0)===1?'':'s')+' if run for real)</span></div>';
 
-    html+='<div style="font-size:.7rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:rgba(41,171,226,.45);margin:1rem 0 .4rem">Per-source result</div>';
+    var parserColour=function(p){
+      if(p==='OK') return '#86efac';
+      if(p==='WARNING') return '#fcd34d';
+      if(p==='not run'||p==='not reached') return 'rgba(255,255,255,.35)';
+      return '#fca5a5';
+    };
+
+    html+='<div style="font-size:.7rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:rgba(41,171,226,.45);margin:1rem 0 .4rem">'
+      +'Source → Fetch → HTTP → Parser → Fields found</div>';
     Object.keys(d.sources||{}).forEach(function(name){
       var o=d.sources[name];
+      var counts=Object.keys(o.field_counts||{}).map(function(f){
+        return '<span style="display:inline-block;margin-right:.9rem">'+h(f)+': <strong>'+o.field_counts[f]+'</strong></span>';
+      }).join('');
       html+='<div style="background:#141c2c;border:1px solid rgba(41,171,226,.1);border-radius:8px;padding:.7rem;margin-top:.5rem">'
-        +'<div style="display:flex;justify-content:space-between;align-items:baseline">'
-        +'<strong style="font-size:.8rem">'+h(name)+'</strong>'
+        +'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:.6rem">'
+        +'<strong style="font-size:.82rem">'+h(name)
+        +' <span style="font-weight:400;font-size:.68rem;color:rgba(255,255,255,.3)">'+h(o.source_class)+' · tier '+o.tier+'</span></strong>'
         +'<span style="font-size:.7rem;color:'+statusColour(o.status)+'">'+h(o.status)
-        +(o.cached?' [cache]':'')+(o.ms?' · '+o.ms+'ms':'')+(o.http?' · HTTP '+o.http:'')+'</span></div>'
-        +(o.error?'<div style="font-size:.74rem;color:#fca5a5;margin-top:.3rem">⚠ '+h(o.error)+'</div>':'')
-        +(o.fields&&o.fields.length?'<div style="font-size:.72rem;color:rgba(41,171,226,.7);margin-top:.3rem">provided: '+h(o.fields.join(', '))+'</div>':'')
-        +(o.data&&Object.keys(o.data).length?'<div class="diag-pre" style="margin-top:.4rem;max-height:160px">'+h(JSON.stringify(o.data,null,2))+'</div>':'')
+        +(o.cached?' [cache]':'')+(o.suppressed?' [cooling down]':'')+'</span></div>'
+        +'<div style="font-size:.75rem;margin-top:.4rem;line-height:1.9">'
+        +'Fetch: <span style="color:'+(o.fetch==='OK'?'#86efac':'#fca5a5')+'">'+h(o.fetch)+'</span>'
+        +' &nbsp;·&nbsp; HTTP '+(o.http?o.http:'—')+(o.ms?' ('+o.ms+'ms)':'')
+        +' &nbsp;·&nbsp; Parser: <span style="color:'+parserColour(o.parser)+';font-weight:700">'+h(o.parser)+'</span>'
+        +' <span style="color:rgba(255,255,255,.25)">'+h(o.parser_version||'')+'</span>'
+        +'</div>'
+        +(counts?'<div style="font-size:.75rem;margin-top:.25rem;color:rgba(41,171,226,.8)">'+counts+'</div>'
+                :'<div style="font-size:.75rem;margin-top:.25rem;color:rgba(255,255,255,.3)">no fields parsed</div>')
+        +(o.error?'<div style="font-size:.73rem;color:#fca5a5;margin-top:.35rem">⚠ '+h(o.error)+'</div>':'')
+        +(o.data&&Object.keys(o.data).length?'<details style="margin-top:.4rem"><summary style="font-size:.72rem;color:rgba(255,255,255,.35);cursor:pointer">raw parsed values</summary>'
+          +'<div class="diag-pre" style="margin-top:.35rem;max-height:180px">'+h(JSON.stringify(o.data,null,2))+'</div></details>':'')
         +'</div>';
     });
 
     html+='<div style="font-size:.7rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:rgba(41,171,226,.45);margin:1.1rem 0 .4rem">Field resolution — who won, and how sure</div>';
-    html+='<table class="atable"><thead><tr><th>Field</th><th>Winner</th><th>Value</th><th>Confidence</th><th>Disagreement</th></tr></thead><tbody>';
+    html+='<table class="atable"><thead><tr><th style="width:110px">Field</th><th>Offered by (normalisation input)</th>'
+      +'<th>Merge result</th><th>Confidence</th><th>Validation &amp; disagreement</th></tr></thead><tbody>';
     Object.keys(d.resolution||{}).forEach(function(f){
       var x=d.resolution[f];
+      var offered=Object.keys(x.offered||{}).map(function(src){
+        return '<span style="color:rgba(255,255,255,.6)">'+h(src)+'</span>: '+h(String(x.offered[src]).slice(0,70));
+      }).join('<br>')||'—';
       html+='<tr><td style="font-weight:700">'+h(f)+'</td>'
-        +'<td>'+h(x.source||'—')+(x.agreed_by&&x.agreed_by.length>1?'<br><span style="font-size:.68rem;color:rgba(255,255,255,.35)">agreed by '+h(x.agreed_by.join(', '))+'</span>':'')+'</td>'
-        +'<td style="max-width:280px">'+h(String(x.value==null?'':x.value).slice(0,140))+'</td>'
+        +'<td style="font-size:.72rem;color:rgba(255,255,255,.45);max-width:250px">'+offered+'</td>'
+        +'<td style="max-width:260px">'+h(String(x.value==null?'':x.value).slice(0,140))
+        +'<br><span style="font-size:.68rem;color:rgba(255,255,255,.35)">via '+h(x.source||'—')
+        +(x.count>1?' · '+x.count+' values':'')
+        +(x.agreed_by&&x.agreed_by.length>1?' · agreed by '+h(x.agreed_by.join(', ')):'')+'</span></td>'
         +'<td style="color:'+(confColour[x.confidence]||'rgba(255,255,255,.35)')+';font-weight:700">'+h(String(x.confidence||'—').toUpperCase())+'</td>'
         +'<td style="font-size:.72rem;color:rgba(255,255,255,.4)">'
-        +((x.conflicts||[]).map(function(c){return h(c.source)+': '+h(String(c.value).slice(0,50));}).join('<br>')||'—')
-        +((x.rejected||[]).length?'<br><span style="color:#fcd34d">rejected: '+(x.rejected||[]).map(function(rj){return h(rj.source)+' ('+h(String(rj.reason).slice(0,60))+')';}).join('; ')+'</span>':'')
+        +((x.conflicts||[]).map(function(c){return '<span style="color:#fca5a5">conflict</span> '+h(c.source)+': '+h(String(c.value).slice(0,45));}).join('<br>')||'')
+        +((x.rejected||[]).length?'<div style="color:#fcd34d;margin-top:.2rem">rejected: '+(x.rejected||[]).map(function(rj){return h(rj.source)+' — '+h(String(rj.reason).slice(0,70));}).join('<br>')+'</div>':'')
+        +(!(x.conflicts||[]).length&&!(x.rejected||[]).length?'passed validation':'')
         +'</td></tr>';
     });
     html+='</tbody></table>';

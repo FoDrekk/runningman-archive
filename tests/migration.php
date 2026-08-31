@@ -16,6 +16,12 @@
 //
 // Exits non-zero on failure. Skips cleanly when no database is reachable.
 // ============================================================
+// Hermetic by construction: outbound requests are disabled before the
+// engine is loaded, so this suite can never reach a live source. Test
+// fixtures are served from loopback, which stays permitted.
+putenv('RM_SCRAPE_OFFLINE=1');
+$_ENV['RM_SCRAPE_OFFLINE'] = '1';
+
 require_once __DIR__ . '/../config/db.php';
 
 $pass = 0; $fail = 0;

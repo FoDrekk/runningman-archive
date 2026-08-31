@@ -375,7 +375,7 @@ CSS;
       <h4><span class="sc-dot" style="color:<?= $colour ?>"><?= $dot ?></span> <?= h((string)$h['label']) ?></h4>
       <div class="sc-meta">
         <span style="color:<?= $colour ?>;font-weight:700"><?= h($label) ?></span>
-        · tier <?= (int)$h['tier'] ?>
+        · <?= h((string)($h['class'] ?? '?')) ?> · tier <?= (int)$h['tier'] ?>
         <?php if ($h['success_rate'] !== null): ?> · <?= (int)$h['success_rate'] ?>% success<?php endif; ?>
         <?php if ($h['avg_ms']): ?> · <?= (int)$h['avg_ms'] ?>ms avg<?php endif; ?>
         <br>
@@ -528,6 +528,22 @@ CSS;
   <div class="sc-meta" style="margin-bottom:.7rem">
     Each field is won by the first source in its own list that returns a value passing validation —
     there is deliberately no single global ranking. Edit these in <code>config/scraping.php</code>.
+  </div>
+  <div class="sc-meta" style="margin-bottom:.9rem;line-height:1.9">
+    <strong style="color:rgba(41,171,226,.7)">Source classes</strong> decide what a source may
+    <em>overwrite</em>, separately from which source wins a field:
+    <span style="color:#4ade80">primary</span> the broadcaster itself ·
+    <span style="color:#29ABE2">secondary</span> substantial edited coverage ·
+    <span style="color:#facc15">metadata</span> supplementary detail — may fill an empty field, but
+    never replaces a value a stronger class recorded ·
+    <span style="color:rgba(255,255,255,.4)">identity</span> person data, not episode data.
+    <?php $byClass = []; foreach ($health as $n => $x) $byClass[$x['class'] ?? '?'][] = $n; ?>
+    <br>
+    <?php foreach (['primary','secondary','metadata','identity'] as $c): ?>
+      <?php if (!empty($byClass[$c])): ?>
+        <strong><?= h($c) ?>:</strong> <?= h(implode(', ', $byClass[$c])) ?>&nbsp;&nbsp;
+      <?php endif; ?>
+    <?php endforeach; ?>
   </div>
   <table class="atable sc-matrix">
     <thead><tr><th style="width:150px">Field</th><th>Priority order</th></tr></thead>
