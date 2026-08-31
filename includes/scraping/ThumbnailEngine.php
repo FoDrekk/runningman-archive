@@ -91,7 +91,8 @@ class RmThumbnailEngine
             }
 
             $dup = $this->findDuplicate($hash, $epNum);
-            $saved = $this->store($epNum, $year, (string)$res->body, $check);
+            $stored = $this->store($epNum, $year, (string)$res->body, $check);
+            $saved  = $stored['path'];
             if ($saved === null) {
                 $attempts[] = ['source'=>$source,'url'=>$url,'ok'=>false,'reason'=>'Could not write the image to disk'];
                 continue;
@@ -116,10 +117,15 @@ class RmThumbnailEngine
             }
 
             $attempts[] = ['source'=>$source,'url'=>$url,'ok'=>true,'reason'=>null];
+            $reason = match (true) {
+                (bool)$dup            => "Saved, but identical to EP$dup — flagged for review",
+                !$stored['changed']   => 'Identical to the stored image — file left untouched',
+                default               => null,
+            };
             return ['ok'=>true,'path'=>$saved,'source'=>$source,'url'=>$url,
-                    'reason'=>$dup ? "Saved, but identical to EP$dup — flagged for review" : null,
+                    'reason'=>$reason,
                     'width'=>(int)$check['width'],'height'=>(int)$check['height'],'hash'=>$hash,
-                    'skipped'=>false,'attempts'=>$attempts];
+                    'skipped'=>!$stored['changed'],'attempts'=>$attempts];
         }
 
         // Every candidate failed. Say what was tried and why each failed —
@@ -158,17 +164,28 @@ class RmThumbnailEngine
         return ['ok'=>true,'reason'=>null,'status'=>'ok','width'=>(int)$check['width'],'height'=>(int)$check['height']];
     }
 
-    /** Resize/crop and write to thumbnails/{year}/epNNN.jpg. */
-    private function store(int $epNum, int $year, string $bytes, array $check): ?string
+    /**
+     * Resize/crop and store at thumbnails/{year}/epNNN.jpg.
+     *
+     * The encode happens in memory and the file is written only when the
+     * result actually differs from what is already there. Two reasons:
+     * "don't re-save an identical thumbnail" then works whether or not
+     * thumbnail_meta has been installed, and an unchanged image no
+     * longer churns its mtime on every verification pass.
+     *
+     * @return array{path:?string, changed:bool}
+     */
+    private function store(int $epNum, int $year, string $bytes, array $check): array
     {
         $dir    = __DIR__ . '/../../thumbnails/' . $year;
         $padded = str_pad((string)$epNum, 3, '0', STR_PAD_LEFT);
         $file   = $dir . '/ep' . $padded . '.jpg';
         $web    = (function_exists('bp') ? bp() : '') . '/thumbnails/' . $year . '/ep' . $padded . '.jpg';
-        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return null;
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) return ['path' => null, 'changed' => false];
 
         $cfg = rmScrapeConfig('thumbnail');
         $targetW = (int)$cfg['target_w']; $targetH = (int)$cfg['target_h'];
+        $encoded = null;
 
         if (extension_loaded('gd')) {
             $src = @imagecreatefromstring($bytes);
@@ -187,15 +204,24 @@ class RmThumbnailEngine
 
                 $dst = imagecreatetruecolor($w, $h);
                 imagecopyresampled($dst, $src, 0, 0, $cropX, $cropY, $w, $h, $cropW, $cropH);
-                imagejpeg($dst, $file, (int)$cfg['jpeg_quality']);
+                ob_start();
+                imagejpeg($dst, null, (int)$cfg['jpeg_quality']);
+                $encoded = ob_get_clean();
                 imagedestroy($src); imagedestroy($dst);
-            } else {
-                @file_put_contents($file, $bytes);   // GD couldn't decode it — keep the original
             }
-        } else {
-            @file_put_contents($file, $bytes);
         }
-        return (is_file($file) && filesize($file) > 1000) ? $web : null;
+        // No GD, or GD could not decode this format — keep the original.
+        if ($encoded === null || $encoded === '') $encoded = $bytes;
+
+        $existing = is_file($file) ? @file_get_contents($file) : false;
+        if ($existing !== false && $existing === $encoded) {
+            return ['path' => $web, 'changed' => false];
+        }
+
+        if (@file_put_contents($file, $encoded) === false) return ['path' => null, 'changed' => false];
+        return (is_file($file) && filesize($file) > 1000)
+            ? ['path' => $web, 'changed' => true]
+            : ['path' => null, 'changed' => false];
     }
 
     private function absolutePath(?string $webPath): ?string

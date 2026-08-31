@@ -283,7 +283,27 @@ if (!$up) {
     check('  → and says so', str_contains(strtolower((string)$res['reason']), 'identical')
                           || str_contains(strtolower((string)$res['reason']), 'unchanged'), true);
 
-    if (getDBSafe() !== null && rmScrapingTablesExist()) {
+    // The skip must not depend on the metadata table: an install that has
+    // not run the migration should still avoid pointless re-encodes and
+    // re-writes. An engine constructed with no database exercises exactly
+    // that path.
+    $noDb = new RmThumbnailEngine(null);
+    $mtimeBefore = @filemtime($thumbFile);
+    clearstatcache(true, $thumbFile);
+    $res = $noDb->acquire($ep, $year, [['url' => "$B/?body=real_image", 'source' => 'fixture']]);
+    clearstatcache(true, $thumbFile);
+    check('unchanged image is detected without any metadata table', $res['skipped'] ?? false, true);
+    check('  → and the file on disk is left untouched', @filemtime($thumbFile), $mtimeBefore);
+
+    // Duplicate detection needs thumbnail_meta specifically, not just any
+    // database — the engine degrades gracefully without it, and so does
+    // this section.
+    $metaTable = false;
+    if (getDBSafe() !== null) {
+        try { getDBSafe()->query('SELECT 1 FROM thumbnail_meta LIMIT 1'); $metaTable = true; }
+        catch (Throwable $e) { $metaTable = false; }
+    }
+    if ($metaTable) {
         section('thumbnails — duplicate detection across episodes');
         $ep2 = 999811;
         $f2 = __DIR__ . "/../thumbnails/$year/ep" . str_pad((string)$ep2, 3, '0', STR_PAD_LEFT) . '.jpg';
@@ -299,7 +319,7 @@ if (!$up) {
         getDBSafe()->exec("DELETE FROM thumbnail_meta WHERE episode_number IN ($ep, $ep2)");
         getDBSafe()->exec("DELETE FROM review_flags WHERE flag_type='duplicate_thumbnail'");
     } else {
-        $skipped[] = 'thumbnail duplicate detection (no database)';
+        $skipped[] = 'thumbnail duplicate detection (needs the thumbnail_meta table)';
     }
     @unlink($thumbFile);
     @rmdir(dirname($thumbFile));
