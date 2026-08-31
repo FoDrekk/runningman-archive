@@ -57,6 +57,8 @@ class RmHttpClient
     const CLASS_REDIRECT     = 'redirect_loop';
     const CLASS_ROBOTS       = 'robots_denied';
     const CLASS_PROXY        = 'proxy_blocked';      // a proxy/gateway refused the tunnel
+    const CLASS_COOLING_DOWN = 'cooling_down';       // suppressed by source health, not attempted
+    const CLASS_OFFLINE      = 'offline_mode';       // outbound requests disabled (tests/CI)
     const CLASS_NO_CURL      = 'curl_missing';
     const CLASS_OTHER        = 'unknown_failure';
 
@@ -109,9 +111,30 @@ class RmHttpClient
             }
         }
 
+        // cache_only: the caller has decided this source must not be
+        // contacted right now — it is in a health cool-down. Cached data
+        // is still perfectly usable, so the check sits HERE, after the
+        // cache lookup and before the socket, rather than at source
+        // selection where it would discard the cache too.
+        if (!empty($opt['cache_only'])) {
+            $r->errorClass = self::CLASS_COOLING_DOWN;
+            $r->error = 'Not contacted — source is in a health cool-down and nothing is cached for this request';
+            $this->lastError = $r->error;
+            return $r;
+        }
+
         if (!function_exists('curl_init')) {
             $r->errorClass = self::CLASS_NO_CURL;
             $r->error = 'PHP curl extension not available';
+            $this->lastError = $r->error;
+            return $r;
+        }
+
+        // Offline mode: loopback still works (test fixtures live there),
+        // everything else is refused before a socket is opened.
+        if (rmScrapeConfig('http.offline', false) && !self::isLoopback($url)) {
+            $r->errorClass = self::CLASS_OFFLINE;
+            $r->error = 'Outbound requests are disabled (RM_SCRAPE_OFFLINE) — no live source was contacted';
             $this->lastError = $r->error;
             return $r;
         }
@@ -243,6 +266,13 @@ class RmHttpClient
             }
         }
         return [$data, $res];
+    }
+
+    /** Loopback hosts stay reachable in offline mode so fixtures work. */
+    public static function isLoopback(string $url): bool
+    {
+        $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+        return in_array($host, ['127.0.0.1', 'localhost', '::1', '[::1]'], true);
     }
 
     private function classifyCurl(int $errno, string $msg): array {

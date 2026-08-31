@@ -50,3 +50,45 @@ function rmEngine(): RmScrapingEngine {
     static $e = null;
     return $e ?: ($e = new RmScrapingEngine());
 }
+
+/**
+ * Execute a .sql migration file statement by statement.
+ *
+ * Uses query() + closeCursor() rather than exec(): these files end with a
+ * "SELECT '… created' AS status" line, and exec() leaves that result set
+ * open, so the following statement — or the very next query anywhere in
+ * the request — dies with "Cannot execute queries while other unbuffered
+ * queries are active". Draining each result keeps the connection usable.
+ *
+ * Splitting is deliberately simple because these files are plain DDL with
+ * no stored procedures, triggers or DELIMITER blocks. If that ever changes,
+ * this needs a real parser rather than a smarter regex.
+ *
+ * @return array{ok:bool, executed:int, errors:string[]}
+ */
+function rmRunSqlFile(PDO $db, string $path): array {
+    $sql = @file_get_contents($path);
+    if ($sql === false) return ['ok' => false, 'executed' => 0, 'errors' => ["Could not read $path"]];
+
+    // Strip full-line comments so they can't be mistaken for statements.
+    $lines = [];
+    foreach (preg_split('/\r?\n/', $sql) as $line) {
+        if (preg_match('/^\s*--/', $line)) continue;
+        $lines[] = $line;
+    }
+    $clean = implode("\n", $lines);
+
+    $executed = 0; $errors = [];
+    foreach (explode(';', $clean) as $stmt) {
+        $stmt = trim($stmt);
+        if ($stmt === '') continue;
+        try {
+            $result = $db->query($stmt);
+            if ($result instanceof PDOStatement) { $result->fetchAll(); $result->closeCursor(); }
+            $executed++;
+        } catch (Throwable $e) {
+            $errors[] = mb_substr($e->getMessage(), 0, 300);
+        }
+    }
+    return ['ok' => $errors === [], 'executed' => $executed, 'errors' => $errors];
+}

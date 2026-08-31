@@ -93,14 +93,55 @@ A source only earns its place if it supplies information the others
 don't, or independently corroborates them. More sources is not better
 data.
 
+## Source classes
+
+Separate from field priority (which source *wins* a field), each source
+is classified by what it *is* — and that decides what it may
+**overwrite**:
+
+| Class | Sources | May overwrite |
+|---|---|---|
+| `primary` | SBS | anything |
+| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv | secondary, metadata |
+| `metadata` | MyDramaList, TMDB | only its own earlier values |
+| `identity` | Wikidata | nothing — not an episode source |
+
+A metadata source may still *fill* an empty field. What it may not do is
+replace a value the broadcaster supplied, on a day when the broadcaster
+happens to be unreachable.
+
+## Tests
+
+```
+php includes/scraping/selftest.php   # normalisation, validation, resolution
+php tests/adapter_contract.php       # every adapter × every malformed response
+php tests/resolution.php             # conflicts, guests, thumbnails
+php tests/migration.php --fresh      # the migration is additive and idempotent
+php tests/integration.php            # write path, modes, dry run, cron recovery
+```
+
+All five are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the
+HTTP client refuse every non-loopback request, so no test can reach a
+live source. Fixtures are served from a local server in
+`tests/fixtures/`. The last two need MySQL/MariaDB and skip cleanly
+without one. CI runs all of them (`.github/workflows/php.yml`).
+
+Set `RM_SCRAPE_OFFLINE=1` yourself whenever you want to be certain a
+command cannot touch a real site.
+
 ## Running
 
 - **Admin → Scraper Centre** — status, targeted actions, dry run, logs,
   change feed, review queue.
 - **Admin → Weekly Update** — the unattended run; also
   `php admin/cron.php --mode=latest --limit=8 [--dry]`.
+- **Admin → Diagnostics → Single Episode Scrape Trace** — the whole
+  pipeline for one episode: source → fetch → HTTP → parser → fields
+  found → normalisation → validation → confidence → merge result. It
+  runs read-only and writes *nothing* — not episode data, not
+  provenance, not source health, not a log row.
 - **Offline self-test** — `php includes/scraping/selftest.php`, or the
-  button in Admin → Diagnostics. No network, no writes.
+  button in Admin → Diagnostics.
 
 ## Database
 

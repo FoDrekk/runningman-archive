@@ -1,0 +1,86 @@
+name: PHP
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Every job here is hermetic. RM_SCRAPE_OFFLINE makes the HTTP client
+# refuse any non-loopback request, so the suite can never reach a live
+# source: deterministic for us, and no unsolicited traffic for them.
+env:
+  RM_SCRAPE_OFFLINE: '1'
+
+jobs:
+  checks:
+    name: Syntax and offline tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.2 is what most XAMPP installs ship; 8.4 is what the project
+        # is developed against. Testing both catches version-specific
+        # breakage cheaply.
+        php: ['8.2', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, dom, gd, mbstring, intl, pdo_mysql
+          coverage: none
+
+      - name: Lint every PHP file
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            php -l "$f" > /dev/null || { echo "SYNTAX ERROR: $f"; php -l "$f"; fail=1; }
+          done < <(find . -path ./.git -prune -o -name '*.php' -print)
+          exit $fail
+
+      - name: Engine self-test
+        run: php includes/scraping/selftest.php
+
+      - name: Adapter contract — failure handling
+        run: php tests/adapter_contract.php
+
+      - name: Field resolution, guests and thumbnails
+        run: php tests/resolution.php
+
+  database:
+    name: Migration and integration (MariaDB)
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: 'yes'
+          MARIADB_DATABASE: runningman_archive
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, dom, gd, mbstring, intl, pdo_mysql
+          coverage: none
+
+      # config/db.php targets a local XAMPP install. Point it at the
+      # service container for this run only; the file is never committed
+      # back, so a contributor's local settings are unaffected.
+      - name: Point the app at the CI database
+        run: |
+          sed -i "s/define('DB_HOST', 'localhost')/define('DB_HOST', '127.0.0.1')/" config/db.php
+          php -r 'require "config/db.php"; exit(getDBSafe() ? 0 : 1);' \
+            || { echo "could not reach the CI database"; exit 1; }
+
+      - name: Install schema and verify the migration is additive
+        run: php tests/migration.php --fresh
+
+      - name: Integration — write path, modes, dry run, cron recovery
+        run: php tests/integration.php

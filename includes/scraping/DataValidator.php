@@ -23,6 +23,11 @@ class RmValidator
         'all rights reserved','copyright ©','404','page not found','javascript is disabled',
         'enable javascript','skip to content','main menu','navigation','advertisement',
         'click here','read more »','您','403 forbidden','access denied','just a moment',
+        // Site status pages: whatever field these land in, they are the
+        // site talking about itself, not about an episode.
+        'under maintenance','site maintenance','temporarily unavailable','service unavailable',
+        'coming soon','be right back','checking your browser','are you a robot',
+        'no results found','nothing found','something went wrong',
     ];
 
     /** MyDramaList falls back to this show-level blurb when it has no episode text. */

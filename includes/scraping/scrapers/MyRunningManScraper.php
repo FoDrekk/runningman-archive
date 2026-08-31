@@ -84,7 +84,7 @@ class MyRunningManScraper extends RmScraper
         if ($syn) $out['synopsis'] = $syn;
 
         // Title — only useful when it carries a descriptor beyond the number.
-        $title = $this->meta($html, 'og:title') ?? $this->firstMatch($html, ['/<h1[^>]*>([^<]{5,150})<\/h1>/i']);
+        $title = $this->episodeTitleCandidate($html, $epNum);
         if ($title && str_contains($title, ' - ')) $out['title'] = RmNormalizer::title($title, $epNum);
 
         $date = $this->firstMatch($html, [
@@ -169,9 +169,10 @@ class MyRMtvScraper extends RmScraper
         $html = (string)$res->body;
         $out  = [];
 
-        $title = $this->meta($html, 'og:title') ?? $this->firstMatch($html, ['/<h1[^>]*>([^<]{5,120})<\/h1>/']);
         // Only accept a title that actually carries a descriptor — this
-        // adapter's bare titles are just the episode number restated.
+        // adapter's bare titles are just the episode number restated —
+        // and only from evidence that is scoped to this episode.
+        $title = $this->episodeTitleCandidate($html, $epNum);
         if ($title !== null) {
             $t = RmNormalizer::title($title, $epNum);
             if (str_contains($t, ' - ')) $out['title'] = $t;

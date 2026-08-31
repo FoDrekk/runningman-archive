@@ -24,6 +24,11 @@ function rmScrapeDefaultConfig(): array {
     return [
         // ── HTTP behaviour ────────────────────────────────────────
         'http' => [
+            // Offline mode refuses every non-loopback request outright.
+            // Set RM_SCRAPE_OFFLINE=1 for test runs and CI, so the suite
+            // can never reach a real source — deterministic for us, and
+            // no unsolicited traffic for them.
+            'offline'          => false,
             'timeout'          => 15,
             'connect_timeout'  => 8,
             'max_retries'      => 2,       // total attempts = 1 + max_retries
@@ -54,14 +59,23 @@ function rmScrapeDefaultConfig(): array {
         ],
 
         // ── Source registry ───────────────────────────────────────
-        // tier = trust weight used by the confidence model:
-        //   3 official/editorially reviewed · 2 solid secondary
-        //   1 community-contributed / best-effort
+        // tier  = trust weight used by the confidence model:
+        //         3 official/editorially reviewed · 2 solid secondary
+        //         1 community-contributed / best-effort
+        //
+        // class = what the source IS, which decides what it may OVERWRITE:
+        //   primary    the broadcaster itself — the record of what aired
+        //   secondary  substantial, edited episode coverage
+        //   metadata   supplementary detail; may FILL gaps but may not
+        //              overwrite a value a stronger class already supplied
+        //   identity   not an episode source at all (person/entity data)
+        //
         // enabled=false sources are never contacted at all.
         'sources' => [
             'sbs' => [
                 'label'   => 'SBS (Official)',
                 'tier'    => 3,
+                'class'   => 'primary',
                 'enabled' => true,
                 'delay_ms'=> 1200,
                 'base'    => 'https://programs.sbs.co.kr/enter/runningman',
@@ -69,6 +83,7 @@ function rmScrapeDefaultConfig(): array {
             'wikipedia' => [
                 'label'   => 'Wikipedia (EN)',
                 'tier'    => 3,
+                'class'   => 'secondary',
                 'enabled' => true,
                 'delay_ms'=> 600,
                 'base'    => 'https://en.wikipedia.org/',
@@ -76,6 +91,7 @@ function rmScrapeDefaultConfig(): array {
             'kowiki' => [
                 'label'   => 'Wikipedia (KO)',
                 'tier'    => 2,
+                'class'   => 'secondary',
                 'enabled' => true,
                 'delay_ms'=> 600,
                 'base'    => 'https://ko.wikipedia.org/',
@@ -83,6 +99,7 @@ function rmScrapeDefaultConfig(): array {
             'myrunningman' => [
                 'label'   => 'myrunningman.com',
                 'tier'    => 2,
+                'class'   => 'secondary',
                 'enabled' => true,
                 'delay_ms'=> 1000,
                 'base'    => 'https://www.myrunningman.com/',
@@ -90,6 +107,7 @@ function rmScrapeDefaultConfig(): array {
             'myrm' => [
                 'label'   => 'myrm.tv',
                 'tier'    => 1,
+                'class'   => 'secondary',
                 'enabled' => true,
                 'delay_ms'=> 1000,
                 'base'    => 'https://myrm.tv/',
@@ -97,6 +115,7 @@ function rmScrapeDefaultConfig(): array {
             'mydramalist' => [
                 'label'   => 'MyDramaList',
                 'tier'    => 1,
+                'class'   => 'metadata',
                 // Historically a flat HTTP 403 from this host (TLS/IP
                 // reputation blocking, not headers). Left enabled so the
                 // engine can prove that for itself and mark the source
@@ -110,6 +129,7 @@ function rmScrapeDefaultConfig(): array {
             'tmdb' => [
                 'label'    => 'TMDB',
                 'tier'     => 2,
+                'class'   => 'metadata',
                 'enabled'  => true,      // still needs a key — see api_keys
                 'delay_ms' => 300,
                 'base'     => 'https://api.themoviedb.org/3/',
@@ -118,6 +138,7 @@ function rmScrapeDefaultConfig(): array {
             'wikidata' => [
                 'label'   => 'Wikidata',
                 'tier'    => 2,
+                'class'   => 'identity',
                 'enabled' => true,
                 'delay_ms'=> 500,
                 'base'    => 'https://www.wikidata.org/',
@@ -146,6 +167,15 @@ function rmScrapeDefaultConfig(): array {
 
         // Fields merged as sets (union + dedup) instead of "one winner".
         'array_fields' => ['guests','tags'],
+
+        // How much authority each class carries. A source may not
+        // overwrite a value recorded from a strictly stronger class.
+        'class_rank' => [
+            'primary'   => 3,
+            'secondary' => 2,
+            'metadata'  => 1,
+            'identity'  => 0,
+        ],
 
         // ── Confidence thresholds ─────────────────────────────────
         'confidence' => [
@@ -204,6 +234,9 @@ function rmScrapeConfig(?string $path = null, $default = null) {
             $v = getenv($env);
             if ($v !== false && trim($v) !== '') $cfg['api_keys'][$k] = trim($v);
         }
+
+        $offline = getenv('RM_SCRAPE_OFFLINE');
+        if ($offline !== false && $offline !== '' && $offline !== '0') $cfg['http']['offline'] = true;
     }
 
     if ($path === null) return $cfg;
@@ -222,6 +255,17 @@ function rmScrapeMergeConfig(array $base, array $over): array {
             ? rmScrapeMergeConfig($base[$k], $v) : $v;
     }
     return $base;
+}
+
+/** What kind of source this is: primary | secondary | metadata | identity. */
+function rmScrapeSourceClass(string $name): string {
+    return (string)rmScrapeConfig("sources.$name.class", 'metadata');
+}
+
+/** Authority ranking of a source's class — higher may overwrite lower. */
+function rmScrapeSourceRank(?string $name): int {
+    if ($name === null || $name === '') return 0;
+    return (int)rmScrapeConfig('class_rank.' . rmScrapeSourceClass($name), 1);
 }
 
 // A source is usable only if enabled AND (if it needs one) keyed.
