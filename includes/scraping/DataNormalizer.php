@@ -55,14 +55,32 @@ class RmNormalizer
         $raw = preg_replace('/\s*[-–|]\s*(?:Wikipedia|위키백과|myrm\.tv|myRunningMan|My Running Man.*|MyRM.*|MyDramaList|SBS.*)$/iu', '', $raw);
         $raw = trim($raw);
 
-        if (preg_match('/(?:Running\s*Man\s*)?Episode\s*#?\d+\s*[–\-—:]\s*(.+)/iu', $raw, $m)) {
-            $desc = trim($m[1]);
-            if (mb_strlen($desc) > 3 && !preg_match('/^(?:Page\s*\d+|Episodes?)/i', $desc)) return "Episode #$padded - $desc";
-        }
-        if (preg_match('/^(?:Running\s*Man\s*)?Episode\s*#?\d+$/i', trim($raw))) return "Episode #$padded";
+        // Strip the leading show name so the number is at the front,
+        // whichever way the source spells it.
+        $raw = trim(preg_replace('/^(?:Running\s*Man|런닝맨)\s*[–\-—:|]?\s*/iu', '', $raw));
 
-        $desc = preg_replace('/^Running\s*Man\s*[–\-—]?\s*(Episode\s*#?\d+\s*[–\-—]?\s*)?/iu', '', $raw);
-        $desc = trim($desc, " \t\n\r\0\x0B-–—:");
+        // Every spelling of an episode number we have actually seen from a
+        // source: "Episode #813", "Episode 813", "Ep. 813", "E813", "#813"
+        // and the Korean "813회".
+        $numbered = '/^(?:(?:Episodes?|Eps?\.?|E)\s*#?\s*(\d{1,4})|#\s*(\d{1,4})|(\d{1,4})\s*회)\s*(?:[–\-—:|.]\s*)?(.*)$/iu';
+
+        if (preg_match($numbered, $raw, $m)) {
+            $found = (int)($m[1] !== '' ? $m[1] : ($m[2] !== '' ? $m[2] : $m[3]));
+            // A title that names a DIFFERENT episode belongs to a different
+            // episode. Renumbering it would launder a mismatched row — a
+            // neighbouring entry from an off-by-one parse, or a source that
+            // paginates differently — into this episode under a
+            // confident-looking name. Drop the descriptor and let the
+            // validator reject a title that then says nothing: losing a
+            // title is recoverable, writing someone else's is not.
+            if ($found !== $epNum) return "Episode #$padded";
+            $desc = trim((string)$m[4], " \t\n\r\0\x0B-–—:|.");
+            return (mb_strlen($desc) > 3 && !preg_match('/^(?:Page\s*\d+|Episodes?)/i', $desc))
+                ? "Episode #$padded - $desc"
+                : "Episode #$padded";
+        }
+
+        $desc = trim($raw, " \t\n\r\0\x0B-–—:");
         if (mb_strlen($desc) > 4 && !preg_match('/^(?:Episodes?|Page\s*\d+)/i', $desc)) return "Episode #$padded - $desc";
         return "Episode #$padded";
     }

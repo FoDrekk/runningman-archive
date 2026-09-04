@@ -189,6 +189,7 @@ class RmHttpClient
             curl_close($ch);
 
             $status  = (int)($info['http_code'] ?? 0);
+            if (!empty($info['url'])) $r->url = (string)$info['url'];   // after redirects, success or not
             $hdrSize = (int)($info['header_size'] ?? 0);
             $rawHeaders = is_string($raw) ? substr($raw, 0, $hdrSize) : '';
             $body    = is_string($raw) ? substr($raw, $hdrSize) : false;

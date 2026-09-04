@@ -23,12 +23,11 @@ adminCheck();
 
 const RM_SCRAPE_LOCK = 'scrape';
 
-function rmJson(array $payload, int $code = 200): void {
-    if (ob_get_level() > 0) ob_clean();
-    http_response_code($code);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-    exit;
+// Thin alias over the shared guard (includes/json_api.php), so this
+// page and every other admin endpoint end a response the same way:
+// buffered, warnings reported rather than printed, fatals still JSON.
+function rmJson(array $payload, int $code = 200): never {
+    rmJsonOut($payload, $code);
 }
 
 $action = $_GET['a'] ?? null;
@@ -410,7 +409,19 @@ CSS;
     <?= !empty($latestRun['dry_run']) ? ' · DRY RUN' : '' ?>
     · <?= h((string)$latestRun['status']) ?>
     · started <?= h((string)$latestRun['started_at']) ?>
-    · sources ok <?= (int)$latestRun['sources_ok'] ?> / failed <?= (int)$latestRun['sources_failed'] ?> / skipped <?= (int)$latestRun['sources_skipped'] ?>
+    <?php
+      // Five separate numbers, because they call for five different
+      // responses. "skipped" used to absorb the other four, which made a
+      // run in which nothing was wrong read as a wall of skips.
+      $sEmpty  = array_key_exists('sources_empty',  $latestRun) ? (int)$latestRun['sources_empty']  : null;
+      $sWarned = array_key_exists('sources_warned', $latestRun) ? (int)$latestRun['sources_warned'] : null;
+    ?>
+    <br>sources:
+    <b><?= (int)$latestRun['sources_ok'] ?></b> gave data
+    <?php if ($sEmpty !== null): ?>· <b><?= $sEmpty ?></b> healthy but had nothing for those episodes<?php endif; ?>
+    <?php if ($sWarned !== null): ?>· <b style="color:<?= $sWarned ? '#fcd34d' : 'inherit' ?>"><?= $sWarned ?></b> reachable but parsed nothing<?php endif; ?>
+    · <b style="color:<?= (int)$latestRun['sources_failed'] ? '#f87171' : 'inherit' ?>"><?= (int)$latestRun['sources_failed'] ?></b> unreachable
+    · <b><?= (int)$latestRun['sources_skipped'] ?></b> never contacted
   </div>
   <?php else: ?>
   <div class="sc-meta">No runs recorded yet<?= $tablesReady ? '.' : ' — install the engine tables to start recording them.' ?></div>
@@ -613,7 +624,8 @@ function act(action, extra, btn){
           '<div><strong>' + esc(d.targets || d.summary.mode) + '</strong>' + (d.summary.dry_run ? ' — DRY RUN, nothing written' : '') +
           '<br>checked ' + (c.checked|0) + ' · added ' + (c.added|0) + ' · updated ' + (c.updated|0) +
           ' · skipped ' + (c.skipped|0) + ' · failed ' + (c.failed|0) +
-          '<br><span class="sc-meta">sources: ' + (c.src_ok|0) + ' ok, ' + (c.src_failed|0) + ' failed, ' + (c.src_skipped|0) + ' skipped · ' +
+          '<br><span class="sc-meta">sources: ' + (c.src_ok|0) + ' gave data, ' + (c.src_empty|0) + ' had nothing for those episodes, ' +
+          (c.src_warned|0) + ' parsed nothing, ' + (c.src_failed|0) + ' unreachable, ' + (c.src_skipped|0) + ' never contacted · ' +
           Math.round((d.summary.duration_ms||0)/100)/10 + 's' + (d.paused ? ' · paused at the time budget, resume to continue' : '') + '</span></div></div>');
       loadLog();
     } else if (d.checked !== undefined) {

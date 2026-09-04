@@ -84,8 +84,16 @@ class RmSourceHealth
                 $sets[] = 'last_error = NULL';
             } elseif ($outcome === 'empty') {
                 $sets[] = 'empty_count = empty_count + 1';
-                $sets[] = 'last_error = ?';
-                $params[] = mb_substr((string)($err ?: 'Source returned no usable fields'), 0, 300);
+                // "This episode is not on the page" is a fact about our
+                // coverage, not a fault in the source: the fetch worked and
+                // the parser worked. Recording it as last_error paints a
+                // healthy source red in the control centre for the rest of
+                // the day. The per-episode detail is kept where it belongs,
+                // in episode_sources and the run log.
+                if (!in_array($class, ['missing_episode', 'not_applicable'], true)) {
+                    $sets[] = 'last_error = ?';
+                    $params[] = mb_substr((string)($err ?: 'Source returned no usable fields'), 0, 300);
+                }
             } elseif ($outcome === 'parser_warning') {
                 $sets[] = 'parser_warnings = parser_warnings + 1';
                 $sets[] = 'empty_count = empty_count + 1';

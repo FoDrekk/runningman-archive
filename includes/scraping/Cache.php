@@ -22,6 +22,11 @@ class RmCache
     private bool   $enabled;
     /** @var array<string,mixed> in-request memo so one run never re-reads the same file */
     private array  $memo = [];
+    /** Bumped by every flush. Parsers that memoise derived results for the
+     *  life of the process (see rmWikiParseYear) compare against this so a
+     *  cleared cache is actually cleared for them too — otherwise a
+     *  long-running worker keeps serving listings the admin just discarded. */
+    private static int $generation = 0;
 
     public function __construct(?string $dir = null) {
         $this->enabled = (bool)rmScrapeConfig('cache.enabled', true);
@@ -36,6 +41,9 @@ class RmCache
     }
 
     public function dir(): string { return $this->dir; }
+
+    /** Changes whenever the cache is flushed. */
+    public static function generation(): int { return self::$generation; }
 
     private function pathFor(string $key): string {
         return $this->dir . '/' . preg_replace('/[^a-z0-9_.-]/i', '_', substr($key, 0, 40))
@@ -99,6 +107,7 @@ class RmCache
             if (@unlink($f)) $n++;
         }
         $this->memo = [];
+        self::$generation++;
         return $n;
     }
 

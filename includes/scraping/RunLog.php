@@ -21,8 +21,17 @@ class RmScrapeRun
     public bool   $dryRun;
     private ?PDO  $db;
     private float $started;
+    // Source outcomes are counted separately because they mean different
+    // things and call for different responses:
+    //   src_ok       contacted, returned usable fields
+    //   src_empty    contacted and healthy, but has no data for THIS
+    //                episode — a coverage gap, not a fault
+    //   src_warned   contacted, reachable, parsed nothing — selectors
+    //                may be stale; this is the one worth chasing
+    //   src_failed   could not be reached at all
+    //   src_skipped  never contacted (not needed, disabled, cooling down)
     private array $counts = ['checked'=>0,'added'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,
-                             'src_ok'=>0,'src_failed'=>0,'src_skipped'=>0];
+                             'src_ok'=>0,'src_empty'=>0,'src_warned'=>0,'src_failed'=>0,'src_skipped'=>0];
     private array $memoryLog = [];      // always kept, even without tables
     private int   $maxMemoryLog = 400;
 
@@ -114,6 +123,16 @@ class RmScrapeRun
         } catch (Throwable $e) { }
     }
 
+    /** Do scrape_runs.sources_empty / sources_warned exist on this install? */
+    private function hasDetailedSourceColumns(): bool
+    {
+        static $has = null;
+        if ($has !== null) return $has;
+        if ($this->db === null) return $has = false;
+        try { $this->db->query('SELECT sources_empty, sources_warned FROM scrape_runs LIMIT 1'); return $has = true; }
+        catch (Throwable $e) { return $has = false; }
+    }
+
     public function finish(string $status = 'completed', string $notes = ''): array
     {
         $durMs = (int)round((microtime(true) - $this->started) * 1000);
@@ -126,19 +145,26 @@ class RmScrapeRun
         }
         if ($this->ready() && $this->id) {
             try {
-                $this->db->prepare(
-                    "UPDATE scrape_runs SET status=?, finished_at=NOW(), duration_ms=?,
-                        episodes_checked=?, episodes_added=?, episodes_updated=?, episodes_skipped=?,
-                        episodes_failed=?, sources_ok=?, sources_failed=?, sources_skipped=?,
-                        notes=?, cursor_state=IF(?='completed', NULL, cursor_state)
-                      WHERE run_id=?"
-                )->execute([
+                $detailed = $this->hasDetailedSourceColumns();
+                $extraCols = $detailed ? ', sources_empty=?, sources_warned=?' : '';
+                $params = [
                     $status, $durMs,
                     $this->counts['checked'], $this->counts['added'], $this->counts['updated'],
                     $this->counts['skipped'], $this->counts['failed'],
                     $this->counts['src_ok'], $this->counts['src_failed'], $this->counts['src_skipped'],
-                    mb_substr($notes, 0, 2000) ?: null, $status, $this->id,
-                ]);
+                ];
+                if ($detailed) { $params[] = $this->counts['src_empty']; $params[] = $this->counts['src_warned']; }
+                $params[] = mb_substr($notes, 0, 2000) ?: null;
+                $params[] = $status;
+                $params[] = $this->id;
+
+                $this->db->prepare(
+                    "UPDATE scrape_runs SET status=?, finished_at=NOW(), duration_ms=?,
+                        episodes_checked=?, episodes_added=?, episodes_updated=?, episodes_skipped=?,
+                        episodes_failed=?, sources_ok=?, sources_failed=?, sources_skipped=?$extraCols,
+                        notes=?, cursor_state=IF(?='completed', NULL, cursor_state)
+                      WHERE run_id=?"
+                )->execute($params);
             } catch (Throwable $e) { }
         }
         return $this->summary($status, $durMs);

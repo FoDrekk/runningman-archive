@@ -170,11 +170,21 @@ class RmScrapingEngine
             $outcome = match (true) {
                 $status === 'ok' && $fields !== []      => 'success',
                 $status === 'parser_warning'            => 'parser_warning',
+                // Reached the page, but its content is rendered client-side
+                // so nothing could be extracted. A real problem needing a
+                // real fix — but not a fetch failure, and not healthy.
+                $status === 'needs_javascript'          => 'parser_warning',
                 // Reached the source but parsed nothing: a parser problem,
                 // not a transport failure. Calling it a failure would hide
                 // the one signal that says "our selectors are stale".
                 $status === 'ok'                        => 'parser_warning',
-                in_array($status, ['empty','missing_episode','not_applicable','disabled'], true) => 'empty',
+                // Never contacted: a cool-down, a disabled source, or one
+                // that supplies no episode fields at all. Counting these
+                // as failures blames sources for work they were never
+                // asked to do.
+                in_array($status, ['suppressed','disabled','not_applicable','skipped'], true) => 'skipped',
+                // Contacted and healthy, but has nothing for THIS episode.
+                in_array($status, ['empty','missing_episode'], true) => 'empty',
                 default                                 => 'failure',
             };
             if ($readOnly) {
@@ -185,7 +195,7 @@ class RmScrapingEngine
                 // elapse on its own rather than clearing it on the
                 // strength of a cached read.
                 $meta[$name]['suppressed'] = true;
-            } elseif ($status !== 'disabled' && $status !== 'not_applicable') {
+            } elseif ($outcome !== 'skipped') {
                 $this->health->record($name, $outcome, [
                     'error_class'    => $data['_error_class'] ?? null,
                     'error'          => $data['_error'] ?? null,
@@ -211,8 +221,18 @@ class RmScrapingEngine
                 : ($data['_error'] ?? $status);
             $this->log('source.' . $outcome, $line,
                 ['episode'=>$epNum,'source'=>$name,'ms'=>(int)($data['_ms'] ?? 0),
-                 'level'=>$outcome === 'success' ? 'info' : ($outcome === 'failure' ? 'error' : 'warning')]);
-            $this->tally($outcome === 'success' ? 'src_ok' : ($outcome === 'failure' ? 'src_failed' : 'src_skipped'));
+                 'level'=>match ($outcome) {
+                     'success', 'skipped' => 'info',
+                     'failure'            => 'error',
+                     default              => 'warning',
+                 }]);
+            $this->tally(match ($outcome) {
+                'success'        => 'src_ok',
+                'failure'        => 'src_failed',
+                'parser_warning' => 'src_warned',
+                'skipped'        => 'src_skipped',
+                default          => 'src_empty',   // reachable, healthy, nothing for this episode
+            });
 
             if ($fields) {
                 $payload = [];
@@ -297,18 +317,49 @@ class RmScrapingEngine
             $reason = match (true) {
                 ($byStatus['suppressed'] ?? 0) > 0 && $contacted === 0 =>
                     'Every usable source is in an automatic cool-down after repeated failures — clear cool-downs in the Scraper Control Centre once the cause is fixed',
+                ($byStatus['needs_javascript'] ?? 0) > 0 && ($byStatus['parser_warning'] ?? 0) === 0 =>
+                    'Reached the source, but its content is rendered by JavaScript and cannot be read from the served HTML ('
+                    . ($byStatus['needs_javascript']) . ' affected) — capture the real endpoint with tools/capture_source.php',
                 ($byStatus['parser_warning'] ?? 0) > 0 =>
                     'Sources were reachable but produced no fields — their page structure may have changed (' . ($byStatus['parser_warning']) . ' affected)',
                 ($byStatus['fetch_failed'] ?? 0) > 0 && $contacted === ($byStatus['fetch_failed'] ?? 0) =>
                     'No source could be reached — check network connectivity and source health',
                 ($byStatus['missing_episode'] ?? 0) > 0 =>
-                    'No source lists this episode yet',
+                    'No source lists this episode yet (' . ($byStatus['missing_episode']) . ' checked and reported it missing)',
+                ($byStatus['empty'] ?? 0) > 0 =>
+                    'Sources were reachable but none carries the fields this episode is missing',
                 default => 'No source returned usable data for this episode',
             };
-            return ['episode'=>$epNum,'skipped'=>false,'failed'=>true,
-                    'reason'=>$reason,
+            // Distinguish "could not check" from "checked, nothing new".
+            //   · a NEW episode with no data anywhere is a real failure:
+            //     the run set out to create it and could not.
+            //   · an EXISTING episode is untouched and intact. If sources
+            //     were reachable and simply had nothing for it, that is a
+            //     coverage gap — a skip, not a failure.
+            //   · but if every source that was contacted failed at the
+            //     transport level, the run genuinely could not check, and
+            //     that stays a failure however intact the episode is.
+            $transportFailed = ($byStatus['fetch_failed'] ?? 0) + ($byStatus['blocked'] ?? 0)
+                             + ($byStatus['rate_limited'] ?? 0) + ($byStatus['adapter_error'] ?? 0);
+            $couldNotCheck   = $contacted > 0 && $transportFailed === $contacted;
+            $isFailure       = $isNew || $couldNotCheck || $contacted === 0;
+
+            $warnings = [];
+            if (($byStatus['parser_warning'] ?? 0) > 0) {
+                $warnings[] = ['field' => '*', 'type' => 'parser_warning',
+                               'message' => ($byStatus['parser_warning']) . ' source(s) loaded but parsed nothing — selectors may be stale'];
+            }
+            $warnings[] = ['field' => '*', 'type' => $isFailure ? 'no_data' : 'no_new_data',
+                           'message' => $isFailure
+                               ? 'No source returned usable data — existing data left untouched'
+                               : 'No source had data for the missing fields — the episode is unchanged and intact'];
+
+            return ['episode'=>$epNum,
+                    'skipped'=>!$isFailure, 'failed'=>$isFailure,
+                    'reason'=>$isFailure ? $reason : ($reason . ' — episode left unchanged'),
                     'is_new'=>$isNew,'changes'=>[],'apply'=>[],'resolved'=>[],'meta'=>$collected['meta'],
-                    'warnings'=>[['field'=>'*','type'=>'no_data','message'=>'Every source failed or had nothing — existing data left untouched']],
+                    'warnings'=>$warnings,
+                    'source_summary'=>$byStatus,
                     'summary'=>['total_applied'=>0],'existing'=>$existing];
         }
 

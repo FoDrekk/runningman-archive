@@ -29,7 +29,13 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     episodes_updated  INT          NOT NULL DEFAULT 0,
     episodes_skipped  INT          NOT NULL DEFAULT 0,
     episodes_failed   INT          NOT NULL DEFAULT 0,
+    -- Source outcomes are counted separately because they mean different
+    -- things: ok = gave data · empty = healthy but has nothing for this
+    -- episode · warned = reachable but parsed nothing (stale selectors)
+    -- · failed = unreachable · skipped = never contacted.
     sources_ok        INT          NOT NULL DEFAULT 0,
+    sources_empty     INT          NOT NULL DEFAULT 0,
+    sources_warned    INT          NOT NULL DEFAULT 0,
     sources_failed    INT          NOT NULL DEFAULT 0,
     sources_skipped   INT          NOT NULL DEFAULT 0,
     last_episode      INT          NULL,                -- resume point
@@ -206,6 +212,14 @@ CREATE TABLE IF NOT EXISTS episode_alt_titles (
     UNIQUE KEY uq_alt (episode_number, title(150)),
     INDEX idx_ep (episode_number)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Installs created before the source counters were split need the two
+-- new columns added. CREATE TABLE IF NOT EXISTS above is a no-op for
+-- them, so the ALTER carries the change; it is a no-op in turn on a
+-- fresh install that already has the columns.
+ALTER TABLE scrape_runs
+    ADD COLUMN IF NOT EXISTS sources_empty  INT NOT NULL DEFAULT 0 AFTER sources_ok,
+    ADD COLUMN IF NOT EXISTS sources_warned INT NOT NULL DEFAULT 0 AFTER sources_empty;
 
 -- Seed the health table so every registered source has a row from day one.
 INSERT IGNORE INTO source_health (source_name, status) VALUES

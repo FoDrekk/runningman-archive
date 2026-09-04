@@ -130,7 +130,8 @@ if ($shouldRun) {
             $c = $runSummary['counts'];
             $status = $runSummary['status'];
             clog("=== {$out['targets']['label']} — {$c['added']} added, {$c['updated']} updated, {$c['skipped']} skipped, {$c['failed']} failed ===");
-            clog('    Sources: ' . $c['src_ok'] . ' ok, ' . $c['src_failed'] . ' failed, ' . $c['src_skipped'] . ' skipped'
+            clog('    Sources: ' . $c['src_ok'] . ' gave data, ' . $c['src_empty'] . ' had nothing for those episodes, '
+                 . $c['src_warned'] . ' parsed nothing, ' . $c['src_failed'] . ' unreachable, ' . $c['src_skipped'] . ' never contacted'
                  . ' · total ' . round((microtime(true) - $startedAt), 1) . 's'
                  . ($out['paused'] ? ' · PAUSED at the time budget — the next run resumes automatically' : ''));
 
@@ -191,8 +192,11 @@ $resumable   = RmScrapeRun::resumable(30);
     <?= (int)$c['checked'] ?> checked · <?= (int)$c['added'] ?> added · <?= (int)$c['updated'] ?> updated ·
     <?= (int)$c['skipped'] ?> skipped · <?= (int)$c['failed'] ?> failed
     · <?= round((int)$runSummary['duration_ms'] / 1000, 1) ?>s
-    <br><span style="opacity:.7;font-size:.78rem">Sources: <?= (int)$c['src_ok'] ?> ok, <?= (int)$c['src_failed'] ?> failed,
-      <?= (int)$c['src_skipped'] ?> skipped because the data was already complete</span>
+    <br><span style="opacity:.7;font-size:.78rem">Sources: <?= (int)$c['src_ok'] ?> gave data,
+      <?= (int)$c['src_empty'] ?> healthy but had nothing for those episodes,
+      <?= (int)$c['src_warned'] ?> reachable but parsed nothing,
+      <?= (int)$c['src_failed'] ?> unreachable,
+      <?= (int)$c['src_skipped'] ?> never contacted</span>
   </div>
 </div>
 <?php elseif ($shouldRun): ?>
