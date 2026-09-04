@@ -39,6 +39,7 @@ class SbsScraper extends RmScraper
     {
         $t0 = microtime(true);
         $reached = false; $lastErr = null; $lastClass = null; $lastUrl = self::PAGE_URLS[0];
+        $lastHtml = null; $lastHtmlUrl = null;
 
         foreach ($this->candidateSources($epNum, $ctx) as $cand) {
             $lastUrl = $cand['url'];
@@ -50,7 +51,7 @@ class SbsScraper extends RmScraper
                 if ($found) return $this->result($found, $cand['url'], $res);
             } else {
                 $res = $this->get($cand['url'], $cand['opt']);
-                if ($res->ok) { $reached = true; }
+                if ($res->ok) { $reached = true; $lastHtml = (string)$res->body; $lastHtmlUrl = $res->url; }
                 else { $lastErr = $res->error; $lastClass = $res->errorClass; continue; }
                 $found = $this->fromHtml((string)$res->body, $epNum, $ctx);
                 if ($found) return $this->result($found, $cand['url'], $res);
@@ -59,15 +60,28 @@ class SbsScraper extends RmScraper
 
         $ms = (int)round((microtime(true) - $t0) * 1000);
         if ($reached) {
-            // Reached SBS but found nothing for this episode. For older
-            // episodes that is ordinary (SBS prunes its VOD listings);
-            // for a recent one it means the page structure moved.
-            $recent = isset($ctx['latest']) && $epNum > ((int)$ctx['latest'] - 12);
-            return $this->emptyResult($lastUrl, $recent ? 'parser_warning' : 'missing_episode',
-                $recent
-                    ? "SBS pages loaded but episode $epNum was not found in them — listing structure may have changed"
-                    : "Episode $epNum is not in SBS's current listings (older episodes are routinely removed)",
-                ['_ms' => $ms, '_error_class' => $recent ? 'unexpected_structure' : 'missing_episode', '_http' => 200]);
+            // Reached SBS but found nothing for this episode. WHY matters:
+            // "the page is a JavaScript shell" and "our selectors drifted"
+            // and "this episode isn't on the listing" need three different
+            // responses, and reporting all three as one parser warning is
+            // what makes the same message repeat for every recent episode
+            // while telling nobody what to do about it.
+            //
+            // Worth stating plainly: this adapter has NO PER-EPISODE URL.
+            // It fetches a programme listing and asks whether the episode
+            // is on it, so even a perfectly-parsed listing can only ever
+            // cover the most recent entries.
+            $d = $lastHtml !== null ? $this->diagnose($lastHtml, $epNum)
+                                    : ['kind' => 'not_listed', 'note' => 'no HTML document was captured'];
+            $status = match ($d['kind']) {
+                'structure_changed' => 'parser_warning',
+                'needs_javascript'  => 'needs_javascript',
+                default             => 'missing_episode',
+            };
+            return $this->emptyResult($lastHtmlUrl ?? $lastUrl, $status,
+                "SBS has no per-episode endpoint — it was asked whether its programme listing contains episode "
+                . "$epNum, and " . $d['note'],
+                ['_ms' => $ms, '_error_class' => $d['kind'], '_http' => 200]);
         }
         return $this->emptyResult($lastUrl, 'fetch_failed', $lastErr ?? 'Could not reach any SBS endpoint',
             ['_ms' => $ms, '_error_class' => $lastClass ?? RmHttpClient::CLASS_OTHER]);
@@ -142,21 +156,29 @@ class SbsScraper extends RmScraper
     /** Parse the rendered programme page for a block naming this episode. */
     private function fromHtml(string $html, int $epNum, array $ctx): ?array
     {
-        // Structured data first — SBS emits JSON-LD on several page types.
-        if (preg_match_all('~<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>~is', $html, $m)) {
-            foreach ($m[1] as $json) {
-                $data = json_decode(trim($json), true);
-                if (is_array($data)) {
-                    $found = $this->fromApi($data, $epNum, $ctx);
-                    if ($found) return $found;
-                }
-            }
+        // Embedded JSON first. SBS renders its VOD list client-side, so
+        // the episode text is frequently absent from the served markup
+        // while the data itself ships in a hydration blob. Reading those
+        // blobs is reading the page's actual mechanism, rather than
+        // adding another selector for markup that was never there.
+        foreach ($this->embeddedJson($html) as $data) {
+            $found = $this->fromApi($data, $epNum, $ctx);
+            if ($found) return $found;
         }
 
-        // Otherwise look for a list item whose text carries "NNN회".
-        $marker = preg_quote((string)$epNum, '~');
-        if (preg_match('~<(li|div|article)[^>]*>((?:(?!</?\1[\s>]).){0,1500}?' . $marker . '\s*회(?:(?!</?\1[\s>]).){0,1500}?)</\1>~isu', $html, $b)) {
-            $block = $b[2];
+        // Otherwise look for the list item whose text carries "NNN회".
+        //
+        // This used to be one regex with two bounded negative-lookahead
+        // repetitions ({0,1500} each). PCRE could not compile it — every
+        // call returned false and raised
+        //     preg_match(): Compilation failed: regular expression is too large
+        // which meant this extraction never ran at all, AND the warning was
+        // printed into whatever response was in flight, corrupting admin
+        // AJAX bodies. Locating the marker by position and walking out to
+        // the enclosing element does the same job, cannot blow up the
+        // regex compiler, and is easier to reason about.
+        $block = $this->blockAroundEpisode($html, $epNum);
+        if ($block !== null) {
             $out = [];
             $title = $this->firstMatch($block, [
                 '~<(?:h\d|strong|p|span)[^>]*class=["\'][^"\']*(?:tit|title|subject)[^"\']*["\'][^>]*>([^<]{2,150})<~i',
@@ -182,6 +204,113 @@ class SbsScraper extends RmScraper
             if ($out) return $out;
         }
         return null;
+    }
+
+    /**
+     * The markup block surrounding the "NNN회" marker for this episode.
+     *
+     * Finds the marker by byte offset, then walks backwards to the nearest
+     * enclosing <li>/<div>/<article> and forwards to its close. Returns
+     * null when the marker is absent. Deliberately not a single regex:
+     * matching a balanced element with bounded lookaheads is what made the
+     * previous pattern uncompilable.
+     */
+    private function blockAroundEpisode(string $html, int $epNum): ?string
+    {
+        if (!preg_match('/(?<!\d)0*' . $epNum . '\s*회/u', $html, $m, PREG_OFFSET_CAPTURE)) return null;
+        $at = (int)$m[0][1];
+
+        // Nearest opening tag before the marker, within a sane window.
+        $windowStart = max(0, $at - 4000);
+        $before = substr($html, $windowStart, $at - $windowStart);
+        $openAt = -1; $openTag = null;
+        foreach (['li', 'article', 'div'] as $tag) {
+            $p = strripos($before, '<' . $tag);
+            if ($p !== false && $p > $openAt) { $openAt = $p; $openTag = $tag; }
+        }
+        if ($openTag === null) {
+            // No container: return a bounded window around the marker so
+            // the field extractors still have something to work with.
+            return substr($html, max(0, $at - 600), 1600);
+        }
+
+        $start = $windowStart + $openAt;
+        $closeNeedle = '</' . $openTag . '>';
+        $closeAt = stripos($html, $closeNeedle, $at);
+        $end = $closeAt === false ? min(strlen($html), $at + 2000) : $closeAt + strlen($closeNeedle);
+        if ($end - $start > 8000) $end = $start + 8000;   // never hand back half the page
+
+        return substr($html, $start, $end - $start);
+    }
+
+    /**
+     * Every JSON document embedded in a page: <script type=…json> blocks
+     * (JSON-LD included) and the `window.__STATE__ = {…}` hydration
+     * assignments frameworks emit. Malformed blocks are skipped rather
+     * than aborting the scan.
+     *
+     * @return array<int,array> decoded documents
+     */
+    private function embeddedJson(string $html): array
+    {
+        $out = [];
+        if (preg_match_all('~<script[^>]+type=["\']application/(?:ld\+)?json["\'][^>]*>(.*?)</script>~is', $html, $m)) {
+            foreach ($m[1] as $blk) {
+                $d = json_decode(trim($blk), true);
+                if (is_array($d)) $out[] = $d;
+            }
+        }
+        // Hydration state: __NEXT_DATA__, __NUXT__, __INITIAL_STATE__, …
+        if (preg_match_all('~(?:window\.)?(__[A-Z0-9_]+__)\s*=\s*(\{.*?\})\s*[;<]~s', $html, $wm, PREG_SET_ORDER)) {
+            foreach ($wm as $blk) {
+                $d = json_decode($blk[2], true);
+                if (is_array($d)) $out[] = $d;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Why did this document not yield the episode? The three answers need
+     * three different fixes, and collapsing them into one warning is what
+     * makes a scraper impossible to debug:
+     *   needs_javascript  a client-rendered shell — no episode text was
+     *                     ever served, so no selector can find it
+     *   not_listed        a real listing that simply does not include
+     *                     this episode (SBS prunes older VOD entries)
+     *   structure_changed the episode IS in the markup but our extraction
+     *                     missed it — the genuine stale-selector case
+     */
+    private function diagnose(string $html, int $epNum): array
+    {
+        $mentions = (bool)preg_match('/(?<!\d)0*' . $epNum . '(?!\d)/', $html);
+        $episodeMarkers = preg_match_all('/\d{1,4}\s*회/u', $html);
+
+        $stripped = preg_replace('~<script\b[^>]*>.*?</script>~is', '', $html);
+        $stripped = preg_replace('~<style\b[^>]*>.*?</style>~is', '', (string)$stripped);
+        $visible  = strlen(trim(preg_replace('/\s+/u', ' ', strip_tags((string)$stripped))));
+        $spa = false;
+        foreach (['__NEXT_DATA__', '__NUXT__', '__INITIAL_STATE__', 'data-reactroot', 'ng-app'] as $needle) {
+            if (str_contains($html, $needle)) { $spa = true; break; }
+        }
+        // A programme page with almost no prose and no episode markers is
+        // a shell, whatever framework built it.
+        $shell = $spa || ($episodeMarkers === 0 && $visible < 2000);
+
+        if ($mentions && $episodeMarkers > 0) {
+            return ['kind' => 'structure_changed',
+                    'note' => "the markup contains episode $epNum but the current extraction did not pick it up — selectors are stale"];
+        }
+        if ($shell) {
+            return ['kind' => 'needs_javascript',
+                    'note' => 'the response is a client-rendered shell (' . $visible . ' bytes of visible text, '
+                            . $episodeMarkers . ' episode markers) — the episode list is loaded by JavaScript, '
+                            . 'so no HTML selector can reach it. Capture the real endpoint with '
+                            . 'tools/capture_source.php --source=sbs --ep=' . $epNum . ' --save=/tmp/sbs'];
+        }
+        return ['kind' => 'not_listed',
+                'note' => 'the page is a listing carrying ' . $episodeMarkers . ' episode(s), and episode '
+                        . $epNum . ' is not among them'];
     }
 
     /** "런닝맨 810회" / "810회 -" / "Ep.810" all identify episode 810. */

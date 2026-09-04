@@ -410,6 +410,196 @@ check('  → and the remaining queue is checkpointed',
       is_array(json_decode((string)($paused['cursor_state'] ?? ''), true)), true);
 $db->exec("UPDATE scrape_runs SET status='aborted', cursor_state=NULL WHERE status='running'");
 
+section('invalid data never reaches an episode that already has good data');
+// Step 4 of the live check-list: prove end to end — not just in the
+// resolver — that a source offering a wrong-year date, a title from a
+// different episode and a stub synopsis cannot damage a good record.
+$badEp = TEST_LO + 8;
+$db->prepare("INSERT INTO episodes (episode_number, title, air_date, synopsis, main_mission, verification_required)
+              VALUES (?,?,?,?,?,0)
+              ON DUPLICATE KEY UPDATE title=VALUES(title), air_date=VALUES(air_date), synopsis=VALUES(synopsis)")
+   ->execute([$badEp, "Episode #$badEp - A Correct Title", '2026-07-15',
+              'A correct and reasonably long synopsis that the archive already holds for this episode.',
+              'The correct mission']);
+$goodBefore = $db->query("SELECT title, air_date, synopsis, main_mission FROM episodes WHERE episode_number=$badEp")->fetch(PDO::FETCH_ASSOC);
+
+RmSourceHealth::instance()->clearSuppression();
+$cache->flush();
+// English Wikipedia offers this episode with a date four years off, a
+// title that belongs to a different episode, and a one-word synopsis.
+seedWikiYear(rmYear($badEp), [$badEp => [
+    'date' => '2011-03-06', 'title' => 'Episode #' . ($badEp + 40) . ' - Someone Else Entirely',
+    'guests' => ['Not A Person 12345'], 'mission' => 'x', 'teams' => '', 'results' => '',
+]]);
+$engine->syncEpisode($badEp, ['all_fields' => true, 'skip_thumbnail' => true]);
+$goodAfter = $db->query("SELECT title, air_date, synopsis, main_mission FROM episodes WHERE episode_number=$badEp")->fetch(PDO::FETCH_ASSOC);
+
+check('a date from the wrong year is refused',   $goodAfter['air_date'], $goodBefore['air_date']);
+check('a title belonging to another episode is refused', $goodAfter['title'], $goodBefore['title']);
+check('a stub synopsis cannot replace a real one',$goodAfter['synopsis'], $goodBefore['synopsis']);
+check('and the mission is left alone',            $goodAfter['main_mission'], $goodBefore['main_mission']);
+check('the rejected guest did not become a person',
+      (int)$db->query("SELECT COUNT(*) FROM guests WHERE name_romanized LIKE '%12345%'")->fetchColumn(), 0);
+
+// The same source, offering the same episode correctly, is still trusted.
+$cache->flush();
+seedWikiYear(rmYear($badEp), [$badEp => [
+    'date' => '2026-07-15', 'title' => "Episode #$badEp - A Correct Title",
+    'guests' => ['Fixture Ha-neul'], 'mission' => 'A properly described mission for this episode',
+    'teams' => 'Blue vs Red', 'results' => 'Blue wins',
+]]);
+$engine->syncEpisode($badEp, ['all_fields' => true, 'skip_thumbnail' => true]);
+check('  → so a later valid answer from it is still accepted',
+      (int)$db->query("SELECT COUNT(*) FROM episode_guests eg JOIN episodes e ON e.episode_id=eg.episode_id
+                       WHERE e.episode_number=$badEp")->fetchColumn() > 0, true);
+
+// ============================================================
+section('source health — broken is not the same as has nothing');
+// The reported symptom behind this: the control centre showed every
+// source Online while the run said "sources ok 0", and a source that
+// simply does not list episode 813 was painted with a red error line.
+// Reachability, coverage and parser health are three different facts.
+$hp   = RmSourceHealth::instance();
+$hsrc = 'kowiki';
+$snapH = $db->query("SELECT * FROM source_health WHERE source_name=" . $db->quote($hsrc))->fetch(PDO::FETCH_ASSOC);
+$db->exec("DELETE FROM source_health WHERE source_name=" . $db->quote($hsrc));
+$hrow = fn() => $db->query("SELECT * FROM source_health WHERE source_name=" . $db->quote($hsrc))->fetch(PDO::FETCH_ASSOC) ?: [];
+
+$hp->record($hsrc, 'success', ['error_class' => 'ok', 'ms' => 100, 'parser_version' => 'kowiki-1.0']);
+check('a source that answered is healthy', $hrow()['status'], 'ok');
+
+// HTTP 200, parser fine, the episode is simply not on the page.
+$hp->record($hsrc, 'empty', ['error_class' => 'missing_episode', 'ms' => 90,
+    'error' => 'Episode 813 is not listed on the 2026 page (52 episodes found)', 'parser_version' => 'kowiki-1.0']);
+$h1 = $hrow();
+check('an episode it does not carry leaves it healthy', $h1['status'], 'ok');
+check('  → and is not written up as a source error',    (string)($h1['last_error'] ?? ''), '');
+check('  → but is still counted, so coverage stays visible', (int)$h1['empty_count'], 1);
+check('  → and it is not put in a cool-down',           $hp->isSuppressed($hsrc), false);
+
+// Reached, parsed, produced nothing: that IS a problem with the source.
+$hp->record($hsrc, 'parser_warning', ['error_class' => 'parser_failure', 'ms' => 95,
+    'error' => 'Year page loaded but produced 0 episode rows', 'parser_version' => 'kowiki-1.0']);
+$h2 = $hrow();
+check('a page that parses to nothing does count against it', (int)$h2['parser_warnings'], 1);
+check('  → and says so',  str_contains((string)$h2['last_error'], '0 episode rows'), true);
+check('  → without being called unreachable', in_array($h2['status'], ['down','blocked'], true), false);
+
+// Transport failure: the only kind that makes a source unreachable.
+$hp->record($hsrc, 'failure', ['error_class' => 'timeout', 'ms' => 20000,
+    'error' => 'Timed out after 20s', 'parser_version' => 'kowiki-1.0']);
+check('a transport failure degrades it', $hrow()['status'], 'degraded');
+for ($i = 0; $i < 2; $i++)
+    $hp->record($hsrc, 'failure', ['error_class' => 'timeout', 'ms' => 20000, 'error' => 'Timed out after 20s']);
+check('  → and repeated ones take it down',   $hrow()['status'], 'down');
+check('  → which does put it in a cool-down', $hp->isSuppressed($hsrc), true);
+
+// A refusal from the site is neither a timeout nor our problem to retry.
+$hp->record($hsrc, 'failure', ['error_class' => 'blocked', 'ms' => 300, 'error' => 'HTTP 403']);
+check('a 403 is classified as blocked, not down', $hrow()['status'], 'blocked');
+
+$hp->record($hsrc, 'success', ['error_class' => 'ok', 'ms' => 100, 'parser_version' => 'kowiki-1.0']);
+$h3 = $hrow();
+check('one good answer clears the record',  (int)$h3['consecutive_failures'], 0);
+check('  → and the stale error with it',    (string)($h3['last_error'] ?? ''), '');
+
+$db->exec("DELETE FROM source_health WHERE source_name=" . $db->quote($hsrc));
+if ($snapH) {
+    $cols = array_keys($snapH);
+    $db->prepare('INSERT INTO source_health (`' . implode('`,`', $cols) . '`) VALUES ('
+                 . implode(',', array_fill(0, count($cols), '?')) . ')')->execute(array_values($snapH));
+}
+
+section('the reported live scenario — a top-up that finds nothing');
+// Reproduces a real run: existing, intact episodes; sources reachable and
+// healthy; none of them carrying the fields those episodes are missing.
+// It used to report "14 checked / 14 failed" with "sources ok 0 /
+// skipped 98" while the health panel correctly showed every source
+// Online — three separate misreadings of a run in which nothing was
+// wrong and nothing was lost.
+wipeTestData($db);
+RmSourceHealth::instance()->clearSuppression();
+$cache->flush();
+$lo = TEST_LO; $hi = TEST_LO + 5;
+
+// Wikipedia lists a different year's episodes, so these are simply not on it.
+seedWikiYear(rmYear($lo), [500 => [
+    'date' => '2020-01-05', 'title' => 'An Older Episode',
+    'guests' => ['Someone'], 'mission' => 'M', 'teams' => 'T', 'results' => 'R',
+]]);
+// SBS serves a client-rendered shell — the live symptom.
+$shell = '<html><head><title>런닝맨</title></head><body><div id="root"></div>'
+       . '<script>window.__NEXT_DATA__={"props":{}}</script></body></html>' . str_repeat(' ', 1200);
+foreach ([md5('https://programs.sbs.co.kr/enter/runningman/visualboard/54666'),
+          md5('https://programs.sbs.co.kr/enter/runningman')] as $h) $cache->set("http:sbs:page:$h", $shell, 300, 'page');
+
+for ($n = $lo; $n <= $hi; $n++) {
+    $db->prepare("INSERT INTO episodes (episode_number, title, air_date, synopsis, main_mission, verification_required)
+                  VALUES (?,?,?,?,?,1)
+                  ON DUPLICATE KEY UPDATE title=VALUES(title), synopsis=VALUES(synopsis)")
+       ->execute([$n, "Episode #$n - Intact Title", '2026-07-01',
+                  'An existing synopsis that must survive a run which finds nothing new at all.', 'Existing mission']);
+    $cache->set("http:mrm:ep:$n", '<html><body><nav>Home | Episodes | Guests</nav></body></html>' . str_repeat(' ', 700), 300, 'page');
+    $cache->set("http:myrm:ep:$n", '<html><body><nav>Home</nav></body></html>' . str_repeat(' ', 500), 300, 'page');
+    $cache->set("http:mdl:ep:$n", '<html><body><nav>Home</nav></body></html>' . str_repeat(' ', 700), 300, 'page');
+}
+// Korean Wikipedia: reachable, but its table covers a different year.
+foreach (["런닝맨의 에피소드 목록 (" . rmYear($lo) . ")",
+          "런닝맨의 에피소드 목록 (" . rmYear($lo) . "년)",
+          '런닝맨의 에피소드 목록'] as $koTitle) {
+    $cache->set('http:kowiki:page:' . rmYear($lo) . ':' . md5($koTitle),
+        json_encode(['parse' => ['text' => ['*' =>
+            '<table class="wikitable"><tr><th>회차</th><th>방송일</th><th>제목</th><th>게스트</th></tr>'
+            . '<tr><td>500</td><td>2020-01-05</td><td>다른 회차</td><td>누군가</td></tr></table>'
+            . str_repeat('<!-- pad -->', 220)]]]), 300, 'api');
+}
+$snapBefore = $db->query("SELECT COUNT(*) c, SUM(CHAR_LENGTH(synopsis)) len FROM episodes
+                           WHERE episode_number BETWEEN $lo AND $hi")->fetch();
+
+$out = $engine->runMode('range', ['from' => $lo, 'to' => $hi, 'limit' => 6,
+                                  'time_limit' => 120, 'scope' => 'integration reported-scenario']);
+$c = $out['summary']['counts'];
+
+check('the run is not reported as failed',        $out['summary']['status'], 'completed');
+check('  → the episodes count as skipped',        (int)$c['skipped'], 6);
+check('  → and none as failed',                   (int)$c['failed'], 0);
+
+// The counters must distinguish the three reasons a source gave nothing.
+check('sources that had nothing are counted as empty, not skipped', (int)$c['src_empty'] > 0, true);
+check('sources that parsed nothing are counted as warned',          (int)$c['src_warned'] > 0, true);
+// The whole point of the split counters: "skipped" must mean "never
+// contacted" and nothing else. Anything that was actually asked has to
+// land in ok / empty / warned / failed however little it gave back. The
+// live run read "ok 0 · failed 6 · skipped 98" precisely because every
+// contacted-but-fruitless source fell into the skipped bucket.
+$neverContacted = 0; $contacted = 0;
+foreach ($out['results'] as $r) {
+    foreach (($r['meta'] ?? []) as $info) {
+        in_array($info['status'] ?? '', ['skipped','disabled','suppressed','not_applicable'], true)
+            ? $neverContacted++ : $contacted++;
+    }
+}
+check('nothing failed at the transport level', (int)$c['src_failed'], 0);
+check('"skipped" counts the never-contacted sources and only those',
+      (int)$c['src_skipped'], $neverContacted);
+check('  → every source that was actually asked is counted elsewhere',
+      (int)$c['src_ok'] + (int)$c['src_empty'] + (int)$c['src_warned'] + (int)$c['src_failed'], $contacted);
+check('  → and this run did ask several of them', $contacted > 0, true);
+
+$snapAfter = $db->query("SELECT COUNT(*) c, SUM(CHAR_LENGTH(synopsis)) len FROM episodes
+                          WHERE episode_number BETWEEN $lo AND $hi")->fetch();
+check('every episode survives untouched',  $snapAfter['c'], $snapBefore['c']);
+check('  → with its synopsis intact',      $snapAfter['len'], $snapBefore['len']);
+
+$one = $out['results'][$hi] ?? [];
+check('the episode result explains itself', strlen((string)($one['reason'] ?? '')) > 30, true);
+check('  → and says the episode was left unchanged',
+      str_contains(strtolower((string)($one['reason'] ?? '')), 'unchanged'), true);
+check('SBS is diagnosed as client-rendered, not a generic parser warning',
+      $one['meta']['sbs']['status'] ?? null, 'needs_javascript');
+check('  → and health does not call SBS unreachable',
+      in_array(RmSourceHealth::instance()->get('sbs')['status'], ['down', 'blocked'], true), false);
+
 echo "\n" . str_repeat('─', 62) . "\n";
 printf("%s — %d passed, %d failed\n", $fail === 0 ? 'INTEGRATION VERIFIED' : 'INTEGRATION PROBLEMS', $pass, $fail);
 exit($fail === 0 ? 0 : 1);

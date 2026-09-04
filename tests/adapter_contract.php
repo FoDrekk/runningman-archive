@@ -249,6 +249,77 @@ $wd = (new WikidataScraper())->episode($testEp);
 check('Wikidata declares itself not-applicable for episodes', $wd['_status'] ?? null, 'not_applicable');
 check('Wikidata contributes no episode fields', (new WikidataScraper())->fields(), []);
 
+section('B4b. adapters must not raise PHP diagnostics');
+// The bug this catches: SbsScraper carried a pattern with two bounded
+// negative-lookahead repetitions that PCRE could not compile. Every call
+// returned false — so the extraction silently never ran — AND raised
+//     preg_match(): Compilation failed: regular expression is too large
+// which printed into whatever admin AJAX response was in flight and made
+// the control centre report `Unexpected token '<'`. A warning from a
+// scraper is never cosmetic: it is either broken logic or a corrupted
+// response, and usually both.
+$raised = [];
+set_error_handler(function (int $no, string $msg, string $file = '', int $line = 0) use (&$raised): bool {
+    $raised[] = sprintf('%s in %s:%d', $msg, basename($file), $line);
+    return true;
+});
+
+// Pages that genuinely exercise the extraction paths, not just the
+// early-outs: each carries the episode so the parsers run to completion.
+$realistic = [
+    'myrunningman' => '<html><head><meta property="og:image" content="https://x.test/ep813.jpg">'
+        . '<meta property="og:title" content="Running Man Episode #813 - Jeju Race">'
+        . '<meta property="og:description" content="The members travel to Jeju Island for a two-day race against the production team.">'
+        . '</head><body><div>Location: Jeju, South Korea</div><div>Broadcast Date: 2026-08-23</div>'
+        . '<a href="/tags/travel">Travel</a></body></html>',
+    'myrm' => '<html><head><meta property="og:title" content="Episode #813 - Jeju Race">'
+        . '<meta property="og:description" content="The members race across Jeju Island for two days.">'
+        . '</head><body><div>Broadcast Date: 2026-08-23</div><div>Guests: Lee Kwang-soo, Jeon So-min</div></body></html>',
+    'mydramalist' => '<html><head><meta property="og:description" content="A specific episode description written by an editor for this episode.">'
+        . '</head><body>Landmark: Jeju Island<br>Guests: Lee Kwang-soo</body></html>',
+];
+foreach ($realistic as $src => $page) {
+    $cache->flush();
+    seedFor($src, 813, $page . str_repeat(' ', 900), $cache);
+    $before = count($raised);
+    RmSourceRegistry::instance()->get($src)->episode(813, ['latest' => 813]);
+    check("$src raises no PHP diagnostics on a realistic page", array_slice($raised, $before), []);
+}
+
+// SBS: both a server-rendered listing and a client-rendered shell.
+$sbsPages = [
+    'server-rendered listing' => '<html><body><ul>'
+        . '<li class="item"><strong class="tit">제주도 레이스</strong><span>2026.08.23</span><em>813회</em></li>'
+        . '</ul></body></html>',
+    'client-rendered shell'   => '<html><head><title>런닝맨</title></head><body><div id="root"></div>'
+        . '<script>window.__NEXT_DATA__={"props":{}}</script></body></html>',
+    'JSON-LD only'            => '<html><head><script type="application/ld+json">'
+        . '{"@type":"TVEpisode","name":"런닝맨 813회 제주도","datePublished":"2026-08-23"}</script></head><body></body></html>',
+];
+foreach ($sbsPages as $label => $page) {
+    $cache->flush();
+    $padded = $page . str_repeat(' ', 1200);
+    foreach ([md5('https://programs.sbs.co.kr/enter/runningman/visualboard/54666'),
+              md5('https://programs.sbs.co.kr/enter/runningman')] as $h) {
+        $cache->set("http:sbs:page:$h", $padded, 300, 'page');
+    }
+    $before = count($raised);
+    $out = (new SbsScraper())->episode(813, ['latest' => 813]);
+    check("sbs raises no PHP diagnostics — $label", array_slice($raised, $before), []);
+    if ($label === 'server-rendered listing') {
+        check('sbs extracts from a server-rendered listing', $out['_status'] ?? null, 'ok');
+        check('  → and finds the Korean title', !empty($out['title_ko']), true);
+        check('  → and the air date', $out['air_date'] ?? null, '2026-08-23');
+    }
+    if ($label === 'client-rendered shell') {
+        check('sbs names client rendering as the obstacle', $out['_status'] ?? null, 'needs_javascript');
+        check('  → and says the content is not in the served HTML',
+              str_contains(strtolower((string)($out['_error'] ?? '')), 'client-rendered'), true);
+    }
+}
+restore_error_handler();
+check('no PHP diagnostic was raised by any adapter', $raised, []);
+
 section('B5. universal invariant across every registered adapter');
 // Whatever a source does, it may never claim "ok" while supplying nothing.
 foreach (RmSourceRegistry::instance()->all() as $name => $adapter) {

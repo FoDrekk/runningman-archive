@@ -426,8 +426,12 @@ function rmWikiParseHtml(string $html): array {
 
 // ── Wikipedia: parsed + cached episodes for ONE year ───────────
 function rmWikiParseYear(int $year, bool $bypassCache = false): array {
+    // Memoised for the life of the process — a run touching 50 episodes of
+    // one year must not re-parse the same page 50 times. Keyed by the cache
+    // generation so that flushing the cache genuinely clears this too.
     static $memo = [];
-    if (!$bypassCache && isset($memo[$year])) return $memo[$year];
+    $gen = RmCache::generation();
+    if (!$bypassCache && ($memo[$year][0] ?? null) === $gen) return $memo[$year][1];
 
     $cache = RmCache::instance();
     $key   = "wiki:episodes:$year";
@@ -436,7 +440,7 @@ function rmWikiParseYear(int $year, bool $bypassCache = false): array {
         // json_decode('[]') returns [] — NOT null — so a previous failed
         // parse would otherwise look like a valid cache hit forever and
         // silently block every future fix. Never trust an empty cache.
-        if (is_array($hit) && count($hit) > 0) { $memo[$year] = $hit; return $hit; }
+        if (is_array($hit) && count($hit) > 0) { $memo[$year] = [$gen, $hit]; return $hit; }
     }
 
     $html     = rmWikiFetchYearPage($year, $bypassCache);
@@ -449,7 +453,7 @@ function rmWikiParseYear(int $year, bool $bypassCache = false): array {
     } else {
         $cache->forget($key);   // clear any stale cache so the next run retries cleanly
     }
-    $memo[$year] = $episodes;
+    $memo[$year] = [$gen, $episodes];
     return $episodes;
 }
 

@@ -156,6 +156,19 @@ function rmScrapingSelfTest(): array
     $check('titles', 'canonical form built',        RmNormalizer::title('Running Man Episode 810 - Jeju Trip', 810), 'Episode #810 - Jeju Trip');
     $check('titles', 'site suffix stripped',        RmNormalizer::title('Episode #810 - Jeju Trip - Wikipedia', 810), 'Episode #810 - Jeju Trip');
     $check('titles', 'index page becomes placeholder', RmNormalizer::title('Episodes - Page 4', 810), 'Episode #810');
+    // Sources number episodes six different ways; all of them must land on
+    // the same canonical form rather than smuggling the number into the
+    // descriptive half of the title.
+    $check('titles', 'abbreviated number understood', RmNormalizer::title('Ep. 810 - Jeju Trip', 810), 'Episode #810 - Jeju Trip');
+    $check('titles', 'bare hash understood',          RmNormalizer::title('#810 Jeju Trip', 810), 'Episode #810 - Jeju Trip');
+    $check('titles', 'Korean 회 understood',           RmNormalizer::title('런닝맨 810회 제주 여행', 810), 'Episode #810 - 제주 여행');
+    // The safety property: a row that names a different episode must not be
+    // renumbered into this one. It reduces to a placeholder, which the
+    // validator then rejects outright.
+    $check('titles', 'a mismatched number is not renumbered', RmNormalizer::title('Episode #877 - Someone Else', 810), 'Episode #810');
+    $check('titles', 'and the same in Korean',                RmNormalizer::title('877회 다른 회차', 810), 'Episode #810');
+    $check('titles', 'a mismatched title is rejected outright',
+           RmValidator::title('Episode #877 - Someone Else', 810)['valid'], false);
     $check('titles', 'equivalent titles share a key', RmNormalizer::titleKey('Episode #810 - Jeju Trip') === RmNormalizer::titleKey('Episode #810 - jeju trip'), true);
 
     // ── Parser-break detection ────────────────────────────────
