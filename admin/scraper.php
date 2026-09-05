@@ -291,6 +291,10 @@ if ($action === 'flush_cache') {
 // ============================================================
 // Page render
 // ============================================================
+// A ?a= request that reached this point matched no handler above.
+// Rendering the page would hand a JSON caller an HTML document.
+rmJsonRejectUnknownAction();
+
 require_once __DIR__ . '/layout.php';
 
 $tablesReady   = rmScrapingTablesExist();

@@ -20,6 +20,8 @@ require_once __DIR__ . '/scrapers/MyDramaListScraper.php';
 require_once __DIR__ . '/scrapers/SbsScraper.php';
 require_once __DIR__ . '/scrapers/TmdbScraper.php';
 require_once __DIR__ . '/scrapers/WikidataScraper.php';
+require_once __DIR__ . '/scrapers/AsianWikiScraper.php';
+require_once __DIR__ . '/scrapers/ImdbScraper.php';
 
 class RmSourceRegistry
 {
@@ -37,6 +39,8 @@ class RmSourceRegistry
             new MyDramaListScraper(),
             new TmdbScraper(),
             new WikidataScraper(),
+            new AsianWikiScraper(),
+            new ImdbScraper(),
         ] as $s) {
             $this->scrapers[$s->name()] = $s;
         }

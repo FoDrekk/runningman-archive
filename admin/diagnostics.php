@@ -353,6 +353,10 @@ if (isset($_GET['a']) && $_GET['a'] === 'cacheclear') {
 }
 
 // ── Normal page render ───────────────────────────────────────────
+// A ?a= request that reached this point matched no handler above.
+// Rendering the page would hand a JSON caller an HTML document.
+rmJsonRejectUnknownAction();
+
 require_once __DIR__ . '/layout.php';
 
 $dbMax = (int)getDB()->query("SELECT MAX(episode_number) FROM episodes")->fetchColumn();

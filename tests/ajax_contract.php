@@ -95,9 +95,19 @@ $endpoints = [
     'diagnostics.php?a=wikitrace&year=2026'     => 'wikipedia year trace',
     'diagnostics.php?a=testurl&url=http%3A%2F%2F127.0.0.1%3A8899%2Findex.php' => 'test any URL',
     'diagnostics.php?a=mrminspect&ep=813'       => 'myrunningman inspect',
-    // auto sync (read-only actions only)
+    // auto sync — the research command centre (read-only actions only)
     'auto_sync.php?a=lock_status'               => 'sync lock status',
     'auto_sync.php?a=progress&done=0&ep=0'      => 'sync progress ping',
+    'auto_sync.php?a=state'                     => 'command centre state',
+    'auto_sync.php?a=install'                   => 'install research tables (idempotent)',
+    'auto_sync.php?a=detect_latest'             => 'latest-episode detection',
+    'auto_sync.php?a=reviews'                   => 'conflict inbox',
+    'auto_sync.php?a=run_step'                  => 'step the run (idle when none)',
+    'auto_sync.php?a=run_report'                => 'last run report',
+    'auto_sync.php?a=episode&ep=813'            => 'one episode research detail',
+    'auto_sync.php?a=evidence&ep=813'           => 'evidence for one episode',
+    'auto_sync.php?a=evidence&ep=813&field=air_date' => 'evidence for one field',
+    'auto_sync.php?a=preview&ep=813'            => 'change preview (dry run)',
     // health / fetch / thumbnails
     'health.php?a=check'                        => 'system health check',
     'fetch.php?a=check'                         => 'fetch: check for new',
@@ -119,6 +129,23 @@ $errorCases = [
     'fetch.php?a=scrape&ep=0'                   => 'fetch scrape with an invalid episode',
     'thumbnails.php?a=grab&ep=0'                => 'thumbnail grab with an invalid episode',
     'auto_sync.php?a=sync&ep=0&dry=1'           => 'auto-sync with an invalid episode',
+    'auto_sync.php?a=episode&ep=0'              => 'research detail for episode 0',
+    'auto_sync.php?a=episode&ep=notanumber'     => 'research detail for a non-numeric episode',
+    'auto_sync.php?a=evidence&ep=0&field=%3Cb%3E' => 'evidence with markup in the field name',
+    'auto_sync.php?a=preview&ep=0'              => 'preview an invalid episode',
+    'auto_sync.php?a=run_report&run=999999'     => 'report for a run that does not exist',
+    'auto_sync.php?a=review_resolve&id=999999&outcome=accepted' => 'resolve a nonexistent decision',
+    'auto_sync.php?a=review_resolve&id=1&outcome=nonsense'      => 'resolve with an unknown outcome',
+    'auto_sync.php?a=run_pause'                 => 'pause with no active run',
+    'auto_sync.php?a=run_resume'                => 'resume with no active run',
+    'auto_sync.php?a=run_cancel'                => 'cancel with no active run',
+    'auto_sync.php?a=retry&ep=0'                => 'retry an invalid episode',
+    'auto_sync.php?a=run_start&scope=nonsense&limit=1' => 'start a run with an unknown scope',
+    // An action the server does not have must still answer in JSON. A
+    // fall-through to the HTML page is how "Unexpected token '<'" gets
+    // back into a codebase that already fixed it once.
+    'auto_sync.php?a=no_such_action'            => 'an action that does not exist',
+    'scraper.php?a=no_such_action'              => 'an unknown action on the control centre',
 ];
 
 function assertJson(string $label, string $base, string $path): void {

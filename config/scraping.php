@@ -143,6 +143,42 @@ function rmScrapeDefaultConfig(): array {
                 'delay_ms'=> 500,
                 'base'    => 'https://www.wikidata.org/',
             ],
+            'asianwiki' => [
+                'label'   => 'AsianWiki',
+                'tier'    => 2,
+                'class'   => 'secondary',
+                // Server-rendered MediaWiki with per-episode pages and
+                // strong guest coverage — it earns its place by supplying
+                // fields the existing set covers weakly, not by adding to
+                // the source count.
+                'enabled' => true,
+                'delay_ms'=> 1200,
+                'base'    => 'https://asianwiki.com/',
+            ],
+            'imdb' => [
+                'label'   => 'IMDb',
+                'tier'    => 2,
+                'class'   => 'metadata',
+                // Read strictly through the public JSON-LD its episode
+                // pages already publish. No login, no API key, and a 403
+                // is recorded as ACCESS_RESTRICTED rather than worked
+                // around.
+                'enabled' => true,
+                'delay_ms'=> 2000,
+                'base'    => 'https://www.imdb.com/',
+                'series'  => 'tt1587289',      // Running Man (SBS, 2010)
+            ],
+        ],
+
+        // ── Publisher lineage ─────────────────────────────────────
+        // Sources that share an upstream are ONE witness, not several.
+        // Wikidata is populated from Wikipedia; the language editions
+        // copy each other routinely. Counting them separately would
+        // manufacture agreement that nobody independently checked.
+        'source_lineage' => [
+            'wikipedia' => 'wikimedia',
+            'kowiki'    => 'wikimedia',
+            'wikidata'  => 'wikimedia',
         ],
 
         // ── FIELD-LEVEL source priority ───────────────────────────
@@ -150,19 +186,19 @@ function rmScrapeDefaultConfig(): array {
         // field. This is deliberately per-field: the site with the best
         // air dates is not the site with the best synopses.
         'field_priority' => [
-            'title'        => ['sbs','wikipedia','myrm','mydramalist','tmdb','kowiki','myrunningman'],
-            'title_ko'     => ['sbs','kowiki','wikidata'],
-            'air_date'     => ['sbs','wikipedia','kowiki','tmdb','mydramalist','myrm','myrunningman'],
-            'synopsis'     => ['myrunningman','myrm','mydramalist','wikipedia','tmdb','sbs','kowiki'],
-            'guests'       => ['wikipedia','kowiki','mydramalist','sbs','myrm','myrunningman'],
-            'mission'      => ['wikipedia','myrunningman','kowiki'],
+            'title'        => ['sbs','wikipedia','myrm','asianwiki','imdb','mydramalist','tmdb','kowiki','myrunningman'],
+            'title_ko'     => ['sbs','kowiki','asianwiki','wikidata'],
+            'air_date'     => ['sbs','wikipedia','kowiki','imdb','tmdb','mydramalist','myrm','myrunningman'],
+            'synopsis'     => ['myrunningman','myrm','asianwiki','mydramalist','imdb','wikipedia','tmdb','sbs','kowiki'],
+            'guests'       => ['wikipedia','kowiki','asianwiki','mydramalist','sbs','myrm','myrunningman'],
+            'mission'      => ['wikipedia','myrunningman','asianwiki','kowiki'],
             'teams'        => ['wikipedia'],
             'results'      => ['wikipedia'],
             'location'     => ['myrunningman','wikipedia','mydramalist','sbs','kowiki'],
             'theme'        => ['myrunningman','wikipedia'],
-            'tags'         => ['myrunningman','wikipedia'],
+            'tags'         => ['myrunningman','wikipedia','asianwiki'],
             'special_notes'=> ['wikipedia','sbs','myrunningman'],
-            'image_url'    => ['myrunningman','tmdb','sbs','myrm','wikipedia'],
+            'image_url'    => ['myrunningman','tmdb','sbs','myrm','imdb','wikipedia'],
         ],
 
         // Fields merged as sets (union + dedup) instead of "one winner".
@@ -196,6 +232,86 @@ function rmScrapeDefaultConfig(): array {
             'max_guests_per_ep'     => 30,
             'max_synopsis_chars'    => 4000,
             'min_synopsis_chars'    => 15,
+        ],
+
+        // ── FIELD-LEVEL source reputation ─────────────────────────
+        // Editorial overrides where a source's standing on one field
+        // differs sharply from its standing overall. Anything not named
+        // here is derived from tier, class and field-priority rank.
+        'field_reputation' => [
+            'air_date' => ['sbs' => 95, 'wikipedia' => 88, 'imdb' => 70],
+            'title_ko' => ['sbs' => 92, 'kowiki' => 88],
+            'guests'   => ['wikidata' => 92, 'wikipedia' => 85, 'kowiki' => 82],
+            'synopsis' => ['sbs' => 55, 'myrunningman' => 80],
+        ],
+
+        // ── Research behaviour ────────────────────────────────────
+        'research' => [
+            // Which sources each mode is willing to spend a request on.
+            // Quick asks only the sources that usually answer; Maximum
+            // asks everything that could conceivably hold the field;
+            // Deep additionally runs public discovery and re-checks
+            // fields that came back weak.
+            'modes' => [
+                'quick'    => ['tiers' => [3],       'discovery' => false, 'recheck_weak' => false,
+                               'label' => 'Quick',            'hint' => 'High-value sources only'],
+                'balanced' => ['tiers' => [3, 2],    'discovery' => false, 'recheck_weak' => false,
+                               'label' => 'Balanced',         'hint' => 'The normal, reliable source set'],
+                'maximum'  => ['tiers' => [3, 2, 1], 'discovery' => true,  'recheck_weak' => false,
+                               'label' => 'Maximum coverage', 'hint' => 'Every enabled source, plus public discovery'],
+                'deep'     => ['tiers' => [3, 2, 1], 'discovery' => true,  'recheck_weak' => true,
+                               'label' => 'Deep research',    'hint' => 'Maximum, plus cross-verification of weak and contested fields'],
+            ],
+            'default_mode' => 'balanced',
+
+            // How long before an episode is worth looking at again. The
+            // point of these numbers is that a source which had nothing
+            // yesterday will still have nothing today, and asking it
+            // anyway is what made the same 386 episodes reappear on
+            // every page load.
+            'cooldown' => [
+                'updated'    => 259200,      // 3d  — something changed; check back soonish
+                'no_new'     => 172800,      // 2d  — reached everything, nothing there
+                'failed'     => 21600,       // 6h  — could not check; the obstacle may pass
+                'conflict'   => 604800,      // 7d  — waiting on more evidence, not more requests
+                'default'    => 86400,
+                'recent_cap' => 86400,       // a recent episode never rests longer than a day
+                'cap'        => 5184000,     // 60d ceiling for everything else
+            ],
+
+            'stale_days'            => 180,  // not verified in this long → worth re-checking
+            'low_confidence_below'  => 75,
+            'overwrite_margin'      => 8,    // new evidence must beat old by this to overwrite
+            'contested_within'      => 12,   // two candidates this close are a conflict, not a winner
+            'max_per_run'           => 200,
+            'step_seconds'          => 20,   // wall-clock budget for one browser-driven step
+            'copyable_fields'       => ['synopsis', 'mission', 'teams', 'results', 'special_notes'],
+
+            // How sure the engine must be before writing unattended.
+            'criticality' => [
+                'episode_number' => 'critical', 'air_date' => 'critical', 'title' => 'critical',
+                'guests' => 'important', 'location' => 'important', 'synopsis' => 'important',
+                'title_ko' => 'important', 'mission' => 'important',
+                'tags' => 'secondary', 'theme' => 'secondary', 'image_url' => 'secondary',
+                'teams' => 'secondary', 'results' => 'secondary', 'special_notes' => 'secondary',
+            ],
+            'thresholds' => [
+                'critical'  => ['update' => 90, 'fill' => 85, 'review' => 70],
+                'important' => ['update' => 82, 'fill' => 75, 'review' => 60],
+                'secondary' => ['update' => 75, 'fill' => 65, 'review' => 50],
+            ],
+        ],
+
+        // ── Public discovery ──────────────────────────────────────
+        // Finding public pages the way a site publishes them: its own
+        // sitemap, its own feed, its own canonical links. Never by
+        // scraping a search engine's results, and never past anything
+        // that asks for a login.
+        'discovery' => [
+            'enabled'        => true,
+            'sitemap_ttl'    => 86400,
+            'max_candidates' => 6,
+            'timeout'        => 12,
         ],
 
         // ── Optional API keys — env or config/scraping.local.php ──
