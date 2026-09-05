@@ -99,6 +99,10 @@ if (isset($_GET['a']) && $_GET['a']==='reverify') {
     exit;
 }
 
+// A ?a= request that reached this point matched no handler above.
+// Rendering the page would hand a JSON caller an HTML document.
+rmJsonRejectUnknownAction();
+
 require_once __DIR__ . '/layout.php';
 
 $total = (int)$db->query("SELECT COUNT(*) FROM episodes")->fetchColumn();

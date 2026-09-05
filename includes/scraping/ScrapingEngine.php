@@ -306,7 +306,13 @@ class RmScrapingEngine
                     'summary'=>['total_applied'=>0],'existing'=>$existing];
         }
 
-        $collected = $this->collect($epNum, $wanted, $opt);
+        // A caller that has already collected (the research service does,
+        // so it can build evidence before deciding) passes the result
+        // through rather than making every source answer the same
+        // question twice in one episode.
+        $collected = (isset($opt['collected']) && is_array($opt['collected']) && isset($opt['collected']['meta']))
+            ? $opt['collected']
+            : $this->collect($epNum, $wanted, $opt);
         if (!$collected['payloads']) {
             // Name the actual obstacle. "No data" is not a diagnosis, and
             // "every source is in a cool-down" needs a completely different

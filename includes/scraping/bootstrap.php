@@ -45,10 +45,60 @@ require_once __DIR__ . '/MissingData.php';
 require_once __DIR__ . '/Integrity.php';
 require_once __DIR__ . '/ScrapingEngine.php';
 
+// ── The research layer (PR #4) ────────────────────────────────
+// Sits on top of the engine rather than beside it: evidence,
+// explainable decisions, per-episode research memory and the
+// persistent run that the Auto Sync command centre drives.
+require_once __DIR__ . '/SourceReputation.php';
+require_once __DIR__ . '/ResearchState.php';
+require_once __DIR__ . '/ResearchRun.php';
+require_once __DIR__ . '/Evidence.php';
+require_once __DIR__ . '/Decision.php';
+require_once __DIR__ . '/Anomaly.php';
+require_once __DIR__ . '/Discovery.php';
+require_once __DIR__ . '/ResearchService.php';
+
 /** Shared engine instance for page code. */
 function rmEngine(): RmScrapingEngine {
     static $e = null;
     return $e ?: ($e = new RmScrapingEngine());
+}
+
+/** Shared research service for page code. */
+function rmResearch(): RmResearchService {
+    static $r = null;
+    return $r ?: ($r = new RmResearchService(null, rmEngine()));
+}
+
+/**
+ * Remove SQL line comments outside string literals.
+ *
+ * Deliberately not a regex: `--` is only a comment when it is not inside
+ * a quoted string, and a regex that ignores quoting will happily gut a
+ * value like 'a -- b'. These files are plain DDL, so a single pass
+ * tracking ' " and ` is enough.
+ */
+function rmStripSqlComments(string $sql): string {
+    $out = ''; $len = strlen($sql); $quote = null;
+    for ($i = 0; $i < $len; $i++) {
+        $c = $sql[$i];
+        if ($quote !== null) {
+            $out .= $c;
+            if ($c === '\\' && $i + 1 < $len) { $out .= $sql[++$i]; continue; }
+            if ($c === $quote) $quote = null;
+            continue;
+        }
+        if ($c === "'" || $c === '"' || $c === '`') { $quote = $c; $out .= $c; continue; }
+        if ($c === '-' && ($sql[$i + 1] ?? '') === '-') {
+            // Runs to the end of the line; keep the newline so line-based
+            // formatting (and any error line numbers) stay meaningful.
+            while ($i < $len && $sql[$i] !== "\n") $i++;
+            $out .= "\n";
+            continue;
+        }
+        $out .= $c;
+    }
+    return $out;
 }
 
 /**
@@ -70,13 +120,13 @@ function rmRunSqlFile(PDO $db, string $path): array {
     $sql = @file_get_contents($path);
     if ($sql === false) return ['ok' => false, 'executed' => 0, 'errors' => ["Could not read $path"]];
 
-    // Strip full-line comments so they can't be mistaken for statements.
-    $lines = [];
-    foreach (preg_split('/\r?\n/', $sql) as $line) {
-        if (preg_match('/^\s*--/', $line)) continue;
-        $lines[] = $line;
-    }
-    $clean = implode("\n", $lines);
+    // Strip comments so they can't be mistaken for statements — INCLUDING
+    // trailing ones. A "-- comma-separated; empty = everything" at the end
+    // of a column definition puts a semicolon inside a comment, and the
+    // naive split below then cuts the CREATE TABLE in half and reports a
+    // syntax error pointing at the comment text. Quote state is tracked so
+    // a legitimate "--" inside a string literal survives.
+    $clean = rmStripSqlComments($sql);
 
     $executed = 0; $errors = [];
     foreach (explode(';', $clean) as $stmt) {

@@ -197,3 +197,28 @@ function rmJsonHandle(callable $fn): never
         ]);
     }
 }
+
+/**
+ * Refuse to render an HTML page for a request that asked for JSON.
+ *
+ * Every admin page has the same shape: AJAX handlers, then the page
+ * render. If a request arrives with ?a=something and no handler
+ * matches — a typo, a stale client, a renamed action, a handler
+ * removed in a refactor — control falls through to the page, and the
+ * caller gets a full HTML document where it expected JSON. That is
+ * exactly the `Unexpected token '<', "<!DOCTYPE"...` failure this
+ * codebase has already fixed once, arriving by a different route.
+ *
+ * Called immediately before each page's layout include, it turns that
+ * silent class of bug into a 400 with a readable message.
+ */
+function rmJsonRejectUnknownAction(?string $action = null): void
+{
+    $action ??= ($_GET['a'] ?? null);
+    if ($action === null || $action === '') return;
+    rmJsonOut([
+        'ok'    => false,
+        'error' => "Unknown action '" . mb_substr((string)$action, 0, 40) . "'",
+        'hint'  => 'No handler matched, so this request would otherwise have received an HTML page.',
+    ], 400);
+}

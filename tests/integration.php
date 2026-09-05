@@ -542,7 +542,15 @@ for ($n = $lo; $n <= $hi; $n++) {
     $cache->set("http:mrm:ep:$n", '<html><body><nav>Home | Episodes | Guests</nav></body></html>' . str_repeat(' ', 700), 300, 'page');
     $cache->set("http:myrm:ep:$n", '<html><body><nav>Home</nav></body></html>' . str_repeat(' ', 500), 300, 'page');
     $cache->set("http:mdl:ep:$n", '<html><body><nav>Home</nav></body></html>' . str_repeat(' ', 700), 300, 'page');
+    // AsianWiki answers with its "no such page" body — reachable, and
+    // genuinely without this episode.
+    $cache->set('http:asianwiki:ep:' . md5("https://asianwiki.com/Running_Man_Episode_$n"),
+        '<html><body>There is currently no text in this page</body></html>' . str_repeat(' ', 500), 300, 'page');
 }
+// IMDb answers with a season listing that does not include these episodes.
+$cache->set('http:imdb:season:' . md5('https://www.imdb.com/title/tt1587289/episodes/?season=' . (rmYear($lo) - 2009)),
+    '<html><body><script type="application/ld+json">{"@type":"TVSeries","episode":[]}</script></body></html>'
+    . str_repeat(' ', 900), 300, 'page');
 // Korean Wikipedia: reachable, but its table covers a different year.
 foreach (["런닝맨의 에피소드 목록 (" . rmYear($lo) . ")",
           "런닝맨의 에피소드 목록 (" . rmYear($lo) . "년)",

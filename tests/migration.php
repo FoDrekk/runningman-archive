@@ -203,7 +203,92 @@ foreach ($before2 as $t => $fp) {
 }
 check('re-running changes nothing', $drift, []);
 
+// ============================================================
+section('install database/research_engine.sql');
+// The research migration ALTERs scrape_runs and scrape_changes, so it is
+// the one with real potential to damage what PR #1 created. The canary
+// row and the fingerprints above are what prove it does not.
+$beforeR = [];
+foreach (array_merge(EXISTING_TABLES, NEW_TABLES) as $t) { $fp = fingerprint($db, $t); if ($fp !== null) $beforeR[$t] = $fp; }
+
+$run3 = runSqlFile($db, "$root/database/research_engine.sql");
+check('research migration ran without errors', $run3['ok'], true);
+if (!$run3['ok']) foreach ($run3['errors'] as $e) echo "       $e\n";
+
+foreach (['research_queue','research_state','research_evidence','research_decisions',
+          'source_reputation','research_discovery'] as $t) {
+    $exists = false;
+    try { $db->query("SELECT 1 FROM `$t` LIMIT 1"); $exists = true; } catch (Throwable $e) {}
+    check("table `$t` exists", $exists, true);
+}
+check('rmResearchTablesExist() agrees', rmResearchTablesExist(true), true);
+
+section('research migration adds columns without disturbing rows');
+$runCols = array_column($db->query('SHOW COLUMNS FROM scrape_runs')->fetchAll(), 'Field');
+foreach (['run_ref','research_mode','episodes_requested','episodes_no_data','episodes_review',
+          'episodes_remaining','evidence_count','avg_confidence','summary','error_summary',
+          'cancel_requested','heartbeat_at'] as $c) {
+    check("scrape_runs.$c", in_array($c, $runCols, true), true);
+}
+$chgCols = array_column($db->query('SHOW COLUMNS FROM scrape_changes')->fetchAll(), 'Field');
+check('scrape_changes.decision',    in_array('decision', $chgCols, true), true);
+check('scrape_changes.reverted_at', in_array('reverted_at', $chgCols, true), true);
+
+// Widening the status enum must not orphan a row written before it.
+$statusType = (string)$db->query("SHOW COLUMNS FROM scrape_runs LIKE 'status'")->fetch()['Type'];
+foreach (['created','queued','running','paused','completed','completed_with_warnings',
+          'failed','cancelled'] as $v) {
+    check("status accepts '$v'", str_contains($statusType, "'$v'"), true);
+}
+foreach (['partial','aborted'] as $v) {
+    check("  → and still accepts the legacy '$v'", str_contains($statusType, "'$v'"), true);
+}
+
+// The canary episode and every pre-existing row must be untouched.
+$driftR = [];
+foreach ($beforeR as $t => $fp) {
+    $after = fingerprint($db, $t);
+    if (($after['rows'] ?? null) !== $fp['rows']) $driftR[] = $t;
+}
+check('no existing table lost or gained a row', $driftR, []);
+check('the canary episode is still exactly as it was',
+      (int)$db->query("SELECT COUNT(*) FROM episodes WHERE episode_number=$seedEp")->fetchColumn(), 1);
+
+section('research migration idempotency');
+$beforeR2 = [];
+foreach (array_merge(EXISTING_TABLES, NEW_TABLES,
+        ['research_queue','research_state','research_evidence','research_decisions',
+         'source_reputation','research_discovery']) as $t) {
+    $fp = fingerprint($db, $t); if ($fp !== null) $beforeR2[$t] = $fp;
+}
+$run4 = runSqlFile($db, "$root/database/research_engine.sql");
+check('second run completes without errors', $run4['ok'], true);
+if (!$run4['ok']) foreach ($run4['errors'] as $e) echo "       $e\n";
+$drift2 = [];
+foreach ($beforeR2 as $t => $fp) {
+    $after = fingerprint($db, $t);
+    if (($after['ddl'] ?? null) !== $fp['ddl'] || ($after['rows'] ?? null) !== $fp['rows']) $drift2[] = $t;
+}
+check('re-running changes nothing at all', $drift2, []);
+
+section('research indexes');
+foreach ([
+    'research_queue'     => ['run_id', 'position'],
+    'research_state'     => ['status', 'next_eligible_at'],
+    'research_evidence'  => ['episode_number', 'run_id'],
+    'research_decisions' => ['episode_number', 'review_status'],
+    'research_discovery' => ['episode_number'],
+] as $table => $columns) {
+    $indexed = array_column($db->query("SHOW INDEX FROM `$table`")->fetchAll(), 'Column_name');
+    foreach ($columns as $c) check("`$table`.`$c` is indexed", in_array($c, $indexed, true), true);
+}
+
 section('seed rows');
+check('source_reputation seeded for every registered source',
+      array_values(array_diff(
+          array_keys((array)rmScrapeConfig('sources', [])),
+          $db->query("SELECT source_name FROM source_reputation WHERE field_name='*'")->fetchAll(PDO::FETCH_COLUMN)
+      )), []);
 check('source_health seeded for every registered source',
       (int)$db->query("SELECT COUNT(*) FROM source_health")->fetchColumn() >= 8, true);
 $registered = array_keys((array)rmScrapeConfig('sources', []));

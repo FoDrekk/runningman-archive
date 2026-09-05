@@ -143,6 +143,10 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['save'])) {
     }
 }
 
+// A ?a= request that reached this point matched no handler above.
+// Rendering the page would hand a JSON caller an HTML document.
+rmJsonRejectUnknownAction();
+
 require_once __DIR__ . '/layout.php';
 
 $recent=$db->query("SELECT episode_number,title,air_date,verification_required FROM episodes ORDER BY episode_number DESC LIMIT 5")->fetchAll();
