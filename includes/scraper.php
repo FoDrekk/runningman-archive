@@ -158,6 +158,18 @@ function rmGetLatestEpDetail(): array {
     return $GLOBALS['__rm_latest_detection'] ?? RmLatestEpisode::detect();
 }
 
+/**
+ * Detection detail PLUS aired/upcoming classification of any candidate
+ * episode past the archive's current maximum — see
+ * RmLatestEpisode::detectDetailed() for what distinguishes this from
+ * rmGetLatestEpDetail() above. This is what the Maintenance "Fetch
+ * Latest Episode" page uses; the plain detail is kept for callers that
+ * only need the raw multi-signal max.
+ */
+function rmGetLatestEpDetection(): array {
+    return RmLatestEpisode::detectDetailed();
+}
+
 // ── Clean/validate title ──────────────────────────────────────
 function rmCleanTitle(string $raw, int $epNum): string {
     return RmNormalizer::title($raw, $epNum);
