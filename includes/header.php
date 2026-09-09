@@ -33,6 +33,10 @@ $navLinks = [
     ['themes.php', $bp . '/pages/themes.php', 'Themes'],
     ['years.php', $bp . '/pages/years.php', 'Years'],
 ];
+// Single-user personal archive — the PR4 admin/research centre is reused
+// as-is (no new page, no admin UI duplicated here) and linked directly
+// from primary nav rather than hidden, per the site's single-user model.
+$maintenanceUrl = $bp . '/admin/index.php';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -71,6 +75,7 @@ $navLinks = [
         <?php foreach ($navLinks as [$file, $url, $label]): ?>
         <a href="<?= $url ?>"<?= $cur === $file ? ' class="active" aria-current="page"' : '' ?>><?= $label ?></a>
         <?php endforeach; ?>
+        <a href="<?= $maintenanceUrl ?>">🔧 Maintenance</a>
       </nav>
       <a href="<?= $bp ?>/search.php" class="nav-search-btn" aria-label="Search episodes">🔍</a>
       <button type="button" class="nav-toggle" id="navToggle" aria-label="Open menu" aria-expanded="false" aria-controls="mobileNav">
@@ -84,6 +89,7 @@ $navLinks = [
   <?php foreach ($navLinks as [$file, $url, $label]): ?>
   <a href="<?= $url ?>"<?= $cur === $file ? ' class="active" aria-current="page"' : '' ?>><?= $label ?></a>
   <?php endforeach; ?>
+  <a href="<?= $maintenanceUrl ?>">🔧 Maintenance</a>
   <a href="<?= $bp ?>/search.php">🔍 Search</a>
 </nav>
 <div class="mobile-nav-backdrop" id="mobileNavBackdrop" hidden></div>
