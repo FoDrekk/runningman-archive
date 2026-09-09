@@ -71,9 +71,15 @@ if (isset($_GET['a']) && $_GET['a'] === 'wikitrace') {
     echo json_encode([
         'year'          => $year,
         'fetch_ok'      => $html !== null,
+        // Which MediaWiki/Wikimedia endpoint actually served this — the
+        // REST API is tried first (a distinct path from /w/, which
+        // Wikipedia's robots.txt has historically restricted for generic
+        // user agents), with the action API as a fallback. Never HTML
+        // page-scraping, never a robots.txt bypass.
+        'transport'     => $html !== null ? rmWikiLastTransport() : null,
         'fetch_chars'   => $html ? strlen($html) : 0,
         'fetch_ms'      => round(($t1-$t0)*1000),
-        'fetch_error'   => $html === null ? rmLastFetchError() : null,
+        'fetch_error'   => $html === null ? (rmWikiLastFetchFailure()['error'] ?? rmLastFetchError()) : null,
         'parse_ms'      => round(($t2-$t1)*1000),
         'episodes_found'=> count($episodes),
         'max_episode'   => $episodes ? max(array_keys($episodes)) : null,
@@ -233,6 +239,20 @@ if (isset($_GET['a']) && $_GET['a'] === 'mrminspect') {
     $ep = (int)($_GET['ep'] ?? 0);
     if ($ep < 1) { echo json_encode(['ok'=>false,'error'=>'Enter a valid episode number']); exit; }
 
+    // This calls rmFetch() directly rather than going through the engine
+    // (which auto-detects a health cool-down and switches an adapter to
+    // cache-only), so the cool-down is checked explicitly here — a manual
+    // diagnostic tool must not become a way to keep hitting a source that
+    // just returned HTTP 403, however many times an operator clicks it.
+    $mrmHealth = RmSourceHealth::instance()->get('myrunningman');
+    if (RmSourceHealth::instance()->isSuppressed('myrunningman')) {
+        echo json_encode(['ok'=>false,'blocked'=>true,
+            'error'=>'MYRUNNINGMAN — source currently blocked, cooldown active until '
+                . ($mrmHealth['suppressed_until'] ?? 'unknown') . ' — not contacted again to avoid hammering it. '
+                . ($mrmHealth['last_error'] ?? '')]);
+        exit;
+    }
+
     // BUGFIX: was "/episodes/$ep" — that's the paginated INDEX route, not
     // a per-episode page (myrunningman.com and myrm.tv share the same
     // /ep/{n} route). Confirmed by live fetch: /episodes/300 returns
@@ -241,7 +261,10 @@ if (isset($_GET['a']) && $_GET['a'] === 'mrminspect') {
     $url  = "https://www.myrunningman.com/ep/$ep";
     $html = rmFetch($url, 12);
     if (!$html) {
-        echo json_encode(['ok'=>false,'error'=>rmLastFetchError() ?: 'fetch failed']);
+        $errClass = RmHttpClient::instance()->lastError();
+        $isBlocked = str_contains((string)$errClass, 'blocked') || str_contains((string)$errClass, '403');
+        echo json_encode(['ok'=>false,'blocked'=>$isBlocked,
+            'error'=>($isBlocked ? 'MYRUNNINGMAN — HTTP 403, source currently blocked. ' : '') . (rmLastFetchError() ?: 'fetch failed')]);
         exit;
     }
 
@@ -604,8 +627,10 @@ async function runWikiTrace(){
   try{
     var r=await fetch(BP+'/admin/diagnostics.php?a=wikitrace&year='+year);
     var d=await r.json();
+    var TRANSPORT_LABEL={mediawiki_rest_api:'Wikimedia REST API (/api/rest_v1/)',mediawiki_action_api:'MediaWiki action API (/w/api.php)',cached:'cached (transport not re-attempted)'};
     var html = '<table class="atable" style="margin-top:.6rem">'
       +'<tr><td style="width:220px;color:rgba(255,255,255,.4)">Fetch result</td><td>'+(d.fetch_ok?'<span class="diag-ok">✓ '+d.fetch_chars.toLocaleString()+' chars</span>':'<span class="diag-fail">✗ '+h(d.fetch_error||'failed')+'</span>')+' ('+d.fetch_ms+'ms)</td></tr>'
+      +(d.transport?'<tr><td style="color:rgba(255,255,255,.4)">Transport</td><td>'+h(TRANSPORT_LABEL[d.transport]||d.transport)+'</td></tr>':'')
       +'<tr><td style="color:rgba(255,255,255,.4)">Episodes parsed</td><td>'+(d.episodes_found>0?'<span class="diag-ok">'+d.episodes_found+'</span>':'<span class="diag-fail">0</span>')+(d.max_episode?' (max EP'+d.max_episode+')':'')+' ('+d.parse_ms+'ms)</td></tr>'
       +'</table>';
     if(d.internal_trace) html += '<div class="diag-pre" style="margin-top:.6rem">'+h(d.internal_trace)+'</div>';
@@ -727,7 +752,7 @@ async function loadSrcHealth(probe){
     var r=await fetch(BP+'/admin/diagnostics.php?a=srchealth'+(probe?'&probe=1':''));
     var d=await r.json();
     if(!d.ok){ out.innerHTML='<span class="diag-fail">'+h(d.error||'failed')+'</span>'; return; }
-    var colour={ok:'#4ade80',parser_warning:'#facc15',degraded:'#facc15',rate_limited:'#fb923c',blocked:'#f87171',down:'#f87171',disabled:'#64748b',unknown:'#64748b'};
+    var colour={ok:'#4ade80',parser_warning:'#facc15',degraded:'#facc15',rate_limited:'#fb923c',blocked:'#f87171',robots_denied:'#94a3b8',down:'#f87171',disabled:'#64748b',unknown:'#64748b'};
     var html='<table class="atable"><thead><tr><th>Source</th><th>Status</th><th>Success rate</th><th>Last success</th><th>Avg</th><th>Diagnosis</th></tr></thead><tbody>';
     Object.keys(d.sources).forEach(function(k){
       var s=d.sources[k], p=(d.probe||{})[k];

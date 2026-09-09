@@ -14,7 +14,11 @@
 //   ok               recent successes, nothing unusual
 //   parser_warning   reachable, but returning no fields where it used to
 //   rate_limited     429s / Retry-After
-//   blocked          401/403 — bot filtering
+//   blocked          401/403 — bot filtering (the SITE is refusing us)
+//   robots_denied    our own robots.txt compliance is refusing the path —
+//                    never bypassed, so this is a policy state, not a
+//                    fault, and must never be conflated with "down": no
+//                    amount of retrying changes a static robots.txt rule
 //   degraded         intermittent failures
 //   down             consecutive hard failures (DNS/TLS/timeout/5xx)
 //   unknown          never attempted since install
@@ -30,6 +34,7 @@ class RmSourceHealth
     const PARSER_WARNING = 'parser_warning';
     const RATE_LIMITED   = 'rate_limited';
     const BLOCKED        = 'blocked';
+    const ROBOTS_DENIED  = 'robots_denied';
     const DEGRADED       = 'degraded';
     const DOWN           = 'down';
     const UNKNOWN        = 'unknown';
@@ -131,6 +136,12 @@ class RmSourceHealth
             $fail   = (int)$h['failure_count'];
 
             if ($class === RmHttpClient::CLASS_OFFLINE)            $status = self::UNKNOWN;
+            // robots_denied is checked BEFORE blocked/proxy: it means WE
+            // chose not to fetch (a static robots.txt rule), never that the
+            // site is malfunctioning or bot-filtering us, so it must never
+            // fall through to DOWN/DEGRADED just because consecutive_failures
+            // climbed — retrying changes nothing about a robots.txt rule.
+            elseif ($class === RmHttpClient::CLASS_ROBOTS)         $status = self::ROBOTS_DENIED;
             elseif ($class === RmHttpClient::CLASS_BLOCKED
                 || $class === RmHttpClient::CLASS_PROXY)           $status = self::BLOCKED;
             elseif ($class === RmHttpClient::CLASS_RATE_LIMITED)   $status = self::RATE_LIMITED;
@@ -141,9 +152,13 @@ class RmSourceHealth
             elseif ($succ > 0)                                     $status = self::OK;
 
             // Back off automatically from a source that is actively refusing
-            // us: the engine skips it until this timestamp passes.
+            // us: the engine skips it until this timestamp passes. A
+            // robots.txt rule doesn't change hour to hour, but the cooldown
+            // still avoids re-parsing/re-checking robots.txt on every single
+            // episode in a run — it's re-evaluated fresh once it lapses.
             $disabledUntil = null;
-            if ($status === self::BLOCKED)          $disabledUntil = date('Y-m-d H:i:s', time() + 3600);
+            if ($status === self::BLOCKED
+                || $status === self::ROBOTS_DENIED) $disabledUntil = date('Y-m-d H:i:s', time() + 3600);
             elseif ($status === self::RATE_LIMITED) $disabledUntil = date('Y-m-d H:i:s', time() + 900);
             elseif ($status === self::DOWN)         $disabledUntil = date('Y-m-d H:i:s', time() + 600);
 
@@ -232,6 +247,7 @@ class RmSourceHealth
             self::DEGRADED       => ['Degraded',        '#facc15', '▲'],
             self::RATE_LIMITED   => ['Rate limited',    '#fb923c', '▲'],
             self::BLOCKED        => ['Blocked',         '#f87171', '■'],
+            self::ROBOTS_DENIED  => ['Robots.txt denied','#94a3b8', '⊘'],
             self::DOWN           => ['Down',            '#f87171', '■'],
             'disabled'           => ['Disabled',        '#64748b', '○'],
             default              => ['Unknown',         '#64748b', '○'],

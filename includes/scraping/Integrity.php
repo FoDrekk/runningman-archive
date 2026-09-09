@@ -509,23 +509,39 @@ class RmLatestEpisode
         $dbMax = $base['signals']['database'] ?? (new RmMissingData())->maxEpisode();
 
         $registry = RmSourceRegistry::instance();
+        $health   = RmSourceHealth::instance();
         $sourceStatus = [];
         foreach ((array)rmScrapeConfig('sources', []) as $name => $cfg) {
             $label = $cfg['label'] ?? $name;
+            $h     = $health->get($name);
             if (array_key_exists($name, $base['signals'])) {
-                $sourceStatus[$name] = ['label' => $label, 'status' => 'ok', 'value' => $base['signals'][$name]];
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'ok', 'value' => $base['signals'][$name],
+                    'last_checked' => $h['last_attempt_at'] ?? null, 'reason' => null];
             } elseif (empty($cfg['enabled'])) {
-                $sourceStatus[$name] = ['label' => $label, 'status' => 'disabled', 'value' => null];
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'disabled', 'value' => null,
+                    'last_checked' => null, 'reason' => 'Disabled in configuration'];
             } elseif (!$registry->usable($name)) {
-                $sourceStatus[$name] = ['label' => $label, 'status' => 'unavailable', 'value' => null];
+                // Distinguish BLOCKED/ROBOTS-DENIED/RATE-LIMITED/DOWN
+                // (RmSourceHealth's real ladder) from a generic
+                // "unavailable" — the whole point of PR10 §2/§15.
+                $hs = (string)($h['status'] ?? 'unknown');
+                $status = in_array($hs, [RmSourceHealth::BLOCKED, RmSourceHealth::ROBOTS_DENIED,
+                                          RmSourceHealth::RATE_LIMITED, RmSourceHealth::DOWN], true)
+                    ? $hs : 'cooldown';
+                $sourceStatus[$name] = ['label' => $label, 'status' => $status, 'value' => null,
+                    'last_checked' => $h['last_attempt_at'] ?? null,
+                    'reason' => $h['last_error'] ?? 'In an automatic cool-down after repeated failures',
+                    'cooldown_until' => $h['suppressed_until'] ?? null];
             } else {
-                $sourceStatus[$name] = ['label' => $label, 'status' => 'no_signal', 'value' => null];
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'no_signal', 'value' => null,
+                    'last_checked' => $h['last_attempt_at'] ?? null,
+                    'reason' => 'Reachable, but this source cannot report its own latest-episode number'];
             }
         }
         if (isset($base['signals']['myrunningman_probe'])) {
             $sourceStatus['myrunningman_probe'] = [
                 'label' => 'myrunningman.com (gap probe)', 'status' => 'ok',
-                'value' => $base['signals']['myrunningman_probe'],
+                'value' => $base['signals']['myrunningman_probe'], 'last_checked' => null, 'reason' => null,
             ];
         }
 
@@ -535,12 +551,12 @@ class RmLatestEpisode
         $external = array_diff_key($base['signals'], ['database' => 1]);
         if (!$external) {
             return array_merge($base, $common, ['latest_aired' => $dbMax ?: null,
-                'decision' => 'source_unavailable',
+                'decision' => 'SOURCE_UNAVAILABLE',
                 'decision_note' => 'No external source responded — cannot confirm whether the archive is current.']);
         }
         if ($base['conflict']) {
             return array_merge($base, $common, ['latest_aired' => $dbMax ?: null,
-                'decision' => 'source_disagreement', 'decision_note' => $base['note']]);
+                'decision' => 'SOURCE_DISAGREEMENT', 'decision_note' => $base['note']]);
         }
 
         // Candidate episode numbers to actually resolve — the same
@@ -571,16 +587,16 @@ class RmLatestEpisode
         }
 
         if ($missingAired) {
-            $decision = 'missing_episodes';
+            $decision = 'MISSING';
             $decisionNote = count($missingAired) . ' aired episode(s) confirmed by live sources are not yet in the database.';
         } elseif ($insufficient) {
-            $decision = 'insufficient_evidence';
+            $decision = 'INSUFFICIENT_EVIDENCE';
             $decisionNote = 'A newer episode number was reported, but no source could confirm an air date for it — nothing inserted.';
         } elseif ($upcoming) {
-            $decision = 'up_to_date';
+            $decision = 'ALREADY_SYNCED';
             $decisionNote = 'Database matches every confirmed aired episode; EP' . $upcoming[0]['episode'] . ' is announced but not yet aired.';
         } else {
-            $decision = 'up_to_date';
+            $decision = 'ALREADY_SYNCED';
             $decisionNote = 'Database matches every confirmed aired episode.';
         }
 

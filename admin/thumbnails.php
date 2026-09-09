@@ -98,14 +98,30 @@ if (isset($_GET['a']) && $_GET['a'] === 'quality') {
         }
 
         // Duplicate images across episodes — only meaningful once
-        // thumbnail_meta (content_hash) is installed.
+        // thumbnail_meta (content_hash) is installed. Every group here
+        // shares an EXACT byte-identical file (that's what content_hash
+        // grouping means), so the real question is never "are these the
+        // same file" but "is that legitimate" — classified from what's
+        // already recorded (dimensions/size, episode adjacency) rather
+        // than assuming every duplicate is a mistake. Never auto-deleted;
+        // this only labels groups for a human to review.
         $duplicates = [];
         try {
-            $duplicates = $db->query(
-                "SELECT content_hash, GROUP_CONCAT(episode_number ORDER BY episode_number) episodes, COUNT(*) c
+            $rows = $db->query(
+                "SELECT content_hash, GROUP_CONCAT(episode_number ORDER BY episode_number) episodes, COUNT(*) c,
+                        MAX(width) width, MAX(height) height, MAX(bytes) bytes
                    FROM thumbnail_meta WHERE content_hash IS NOT NULL AND content_hash <> ''
                   GROUP BY content_hash HAVING c > 1"
             )->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $r) {
+                $eps = array_map('intval', explode(',', (string)$r['episodes']));
+                $r['classification'] = RmThumbnailEngine::classifyDuplicate(
+                    $eps, $r['width'] !== null ? (int)$r['width'] : null,
+                    $r['height'] !== null ? (int)$r['height'] : null,
+                    $r['bytes'] !== null ? (int)$r['bytes'] : null
+                );
+                $duplicates[] = $r;
+            }
         } catch (Throwable $e) { /* thumbnail_meta not installed — skip */ }
 
         $missingThumb = (int)$db->query(
@@ -130,11 +146,14 @@ if (isset($_GET['a']) && $_GET['a'] === 'quality') {
 if (isset($_GET['a']) && $_GET['a']==='reverify') {
     header('Content-Type: application/json');
     set_time_limit(30);
-    $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? '';
+    // Resolved via RmThumbnailEngine::absolutePath() (__DIR__-relative),
+    // not $_SERVER['DOCUMENT_ROOT'] — see that method for why the latter
+    // is unreliable under XAMPP subfolder installs / reverse proxies.
+    $te = new RmThumbnailEngine($db);
     $rows = $db->query("SELECT thumbnail_id, episode_number, local_path, verified FROM thumbnails")->fetchAll();
     $corrected = 0; $realCount = 0;
     foreach ($rows as $r) {
-        $diskPath   = $r['local_path'] ? $docRoot . $r['local_path'] : '';
+        $diskPath   = $r['local_path'] ? $te->absolutePath($r['local_path']) : null;
         $realExists = $diskPath && file_exists($diskPath) && filesize($diskPath) > 1000;
         if ($realExists)  $realCount++;
         if ($realExists && (int)$r['verified'] !== 1) {
@@ -168,11 +187,12 @@ if (file_exists($cacheFile) && (time()-filemtime($cacheFile)) < 300) {
     $cached = json_decode(file_get_contents($cacheFile), true);
     $verified = $cached['real_files'] ?? 0;
 } else {
-    $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? '';
+    $te = new RmThumbnailEngine($db);
     $rows = $db->query("SELECT local_path FROM thumbnails WHERE verified=1")->fetchAll(PDO::FETCH_COLUMN);
     $verified = 0;
     foreach ($rows as $path) {
-        if ($path && file_exists($docRoot.$path) && filesize($docRoot.$path) > 1000) $verified++;
+        $abs = $path ? $te->absolutePath($path) : null;
+        if ($abs && file_exists($abs) && filesize($abs) > 1000) $verified++;
     }
     @file_put_contents($cacheFile, json_encode(['real_files'=>$verified, 'checked_at'=>date('c')]));
 }
@@ -275,15 +295,23 @@ async function runQualityCheck(){
       +'<span>✗ Broken: <strong style="color:#fca5a5">'+(d.by_status.broken||0)+'</strong></span>'
       +'<span>— No thumbnail at all: <strong style="color:#fcd34d">'+d.no_thumbnail_at_all+'</strong></span>'
       +'</div>';
+    lastBadEpisodes=d.bad.map(function(b){return b.episode});
     if(d.bad.length){
-      html+='<div style="font-weight:700;font-size:.8rem;color:#fca5a5;margin-bottom:.4rem">Bad thumbnails ('+d.bad.length+')</div>'
+      html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">'
+        +'<div style="font-weight:700;font-size:.8rem;color:#fca5a5">Bad thumbnails ('+d.bad.length+')</div>'
+        +'<button class="btn btn-sm" onclick="repairBroken()">🔧 Repair Broken ('+d.bad.length+')</button></div>'
         +'<div class="sc-log" style="max-height:200px;overflow-y:auto;font-size:.74rem;margin-bottom:.8rem">'
         +d.bad.map(function(b){return 'EP'+pad(b.episode)+' — '+b.status+': '+(b.reason||'');}).join('\n')+'</div>';
     }
     if(d.duplicates.length){
-      html+='<div style="font-weight:700;font-size:.8rem;color:#fcd34d;margin-bottom:.4rem">Duplicate images across episodes ('+d.duplicates.length+')</div>'
-        +'<div class="sc-log" style="max-height:160px;overflow-y:auto;font-size:.74rem">'
-        +d.duplicates.map(function(g){return 'EP'+g.episodes.split(',').join(', EP')+' share one image';}).join('\n')+'</div>';
+      var CLASS_COLOR={LIKELY_WRONG_EPISODE:'#fca5a5',PLACEHOLDER_DUPLICATE:'#fcd34d',LEGITIMATE_SHARED_IMAGE:'#86efac'};
+      var CLASS_LABEL={LIKELY_WRONG_EPISODE:'likely wrong episode — review',PLACEHOLDER_DUPLICATE:'placeholder image',LEGITIMATE_SHARED_IMAGE:'legitimate shared image (e.g. multi-part special)'};
+      html+='<div style="font-weight:700;font-size:.8rem;color:#fcd34d;margin-bottom:.4rem">Duplicate images across episodes ('+d.duplicates.length+') — repair suggestions, nothing auto-deleted</div>'
+        +'<div class="sc-log" style="max-height:200px;overflow-y:auto;font-size:.74rem">'
+        +d.duplicates.map(function(g){
+          var color=CLASS_COLOR[g.classification]||'rgba(255,255,255,.5)', label=CLASS_LABEL[g.classification]||g.classification;
+          return 'EP'+g.episodes.split(',').join(', EP')+' share one image — <span style="color:'+color+'">'+label+'</span>';
+        }).join('\n')+'</div>';
     }
     if(!d.bad.length && !d.duplicates.length){
       html+='<div class="alert alert-ok">✓ No bad or duplicate thumbnails found across '+d.checked+' checked.</div>';
@@ -307,16 +335,25 @@ async function reverifyThumbs(){
   btn.disabled=false; btn.innerHTML='🔍 Re-verify Against Real Files';
 }
 
-async function batchGrab(from,to){
+var lastBadEpisodes=[];
+
+// Shared by "Grab All Missing"/"Grab Range" (a plain number range) and
+// "Repair Broken" (the exact episode list the quality check flagged).
+// Same endpoint either way: RmThumbnailEngine::acquire() tries every
+// candidate source in priority order and never touches a good existing
+// file if nothing better is found, so re-running this on an
+// already-fine thumbnail is a safe no-op, not a destructive action.
+async function grabList(list){
   if(bRunning){toast('Already running');return}
   bRunning=true;stopFlag=false;
   document.getElementById('btnAll').disabled=true;
   document.getElementById('btnStop').style.display='';
   document.getElementById('bProg').style.display='block';
   document.getElementById('bLog').innerHTML='';
-  var total=to-from+1,done=0,ok=0;
-  for(var i=from;i<=to;i++){
+  var total=list.length,done=0,ok=0;
+  for(var idx=0;idx<list.length;idx++){
     if(stopFlag)break;
+    var i=list[idx];
     document.getElementById('bLbl').textContent='EP'+pad(i)+' ('+done+'/'+total+')';
     document.getElementById('bPct').textContent=Math.round(done/total*100)+'%';
     document.getElementById('bBar').style.width=(done/total*100)+'%';
@@ -336,6 +373,14 @@ async function batchGrab(from,to){
   document.getElementById('bBar').style.background=ok>0?'#22c55e':'#29ABE2';
   bRunning=false;document.getElementById('btnAll').disabled=false;document.getElementById('btnStop').style.display='none';
   toast('Done: '+ok+' thumbnails saved');
+}
+function repairBroken(){
+  if(!lastBadEpisodes.length){toast('Run the quality check first');return}
+  grabList(lastBadEpisodes);
+}
+async function batchGrab(from,to){
+  var list=[]; for(var i=from;i<=to;i++) list.push(i);
+  return grabList(list);
 }
 </script>
 </body></html>

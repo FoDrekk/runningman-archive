@@ -85,6 +85,49 @@ class RmScrapingEngine
         if ($this->run) $this->run->count($key, $n);
     }
 
+    /**
+     * A REFINEMENT of a skipped/failed plan() result — never a
+     * replacement (the caller still tallies 'skipped'/'failed' exactly
+     * as before). Distinguishes WHY, using the same per-source status
+     * breakdown plan() already computed:
+     *
+     *   unchanged              nothing was even asked (already complete)
+     *   source_blocked         every contacted source that mattered was
+     *                          403/robots.txt-denied/429/cooling down —
+     *                          a policy/access wall, not our episode data
+     *   source_unavailable     genuine transport failure (DNS/timeout/5xx)
+     *   needs_review           reachable, parsed nothing — selectors may
+     *                          be stale, worth a human's attention
+     *   insufficient_evidence  reachable and healthy, but nothing usable
+     *                          for this episode/gap — a coverage gap
+     *
+     * Returns null for a plain success (added/updated) — those don't
+     * need a bucket here.
+     */
+    public static function classifyOutcome(array $result): ?string
+    {
+        if (!empty($result['skipped']) && empty($result['source_summary'])) return 'unchanged';
+
+        $by = $result['source_summary'] ?? null;
+        if (!$by) return null;
+
+        if (($by['parser_warning'] ?? 0) > 0) return 'needs_review';
+
+        $blockedClasses = [RmHttpClient::CLASS_ROBOTS, RmHttpClient::CLASS_BLOCKED,
+                            RmHttpClient::CLASS_RATE_LIMITED, RmHttpClient::CLASS_PROXY];
+        $blocked = 0; $unreachable = 0;
+        foreach ((array)($result['meta'] ?? []) as $m) {
+            if (in_array($m['class'] ?? null, $blockedClasses, true)) $blocked++;
+            elseif (($m['status'] ?? null) === 'fetch_failed') $unreachable++;
+        }
+        if (($by['suppressed'] ?? 0) > 0 || $blocked > 0) return 'source_blocked';
+        if (($by['fetch_failed'] ?? 0) > 0 && $unreachable > 0) return 'source_unavailable';
+
+        // needs_javascript / missing_episode / empty: reachable, healthy,
+        // genuinely nothing usable for this gap — not a fault anywhere.
+        return 'insufficient_evidence';
+    }
+
     // ────────────────────────────────────────────────────────────
     // STAGE 1 — COLLECT
     // ────────────────────────────────────────────────────────────
@@ -162,7 +205,12 @@ class RmScrapingEngine
                 'ms'      => (int)($data['_ms'] ?? 0),
                 'fields'  => $fields,
                 'cached'  => !empty($data['_cached']),
-                'version' => $adapter->parserVersion(),
+                // An adapter can report a more specific version/transport
+                // for THIS result (e.g. Wikipedia recording which of its
+                // two MediaWiki endpoints actually served it) via
+                // _parser_version; every other adapter falls back to its
+                // fixed parserVersion() exactly as before.
+                'version' => $data['_parser_version'] ?? $adapter->parserVersion(),
             ];
 
             // Health: distinguish "worked", "reachable but produced
@@ -702,13 +750,18 @@ class RmScrapingEngine
 
         if (!empty($result['skipped'])) {
             $this->tally('skipped');
+            $this->tally(self::classifyOutcome($result) ?? 'unchanged');
             $this->log('episode.skipped', (string)($result['reason'] ?? 'already complete'), ['episode'=>$epNum,'ms'=>$ms]);
         } elseif (!empty($result['failed'])) {
             $this->tally('failed');
+            $extra = self::classifyOutcome($result);
+            if ($extra) $this->tally($extra);
             $this->log('episode.failed', (string)($result['reason'] ?? 'unknown failure'), ['episode'=>$epNum,'ms'=>$ms,'level'=>'error']);
         } else {
             $applied = (int)($result['summary']['total_applied'] ?? 0);
-            if (!empty($result['is_new'])) $this->tally('added'); elseif ($applied > 0) $this->tally('updated'); else $this->tally('skipped');
+            if (!empty($result['is_new'])) $this->tally('added');
+            elseif ($applied > 0) $this->tally('updated');
+            else { $this->tally('skipped'); $this->tally('unchanged'); }
             $this->log('episode.saved',
                 (!empty($result['is_new']) ? 'added' : ($applied ? "updated ($applied field" . ($applied === 1 ? '' : 's') . ')' : 'no changes needed'))
                 . (!empty($opt['dry_run']) ? ' [DRY RUN — nothing written]' : ''),

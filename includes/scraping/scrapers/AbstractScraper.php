@@ -38,6 +38,25 @@ abstract class RmScraper
     /** Bump when the parsing logic changes — stored in provenance. */
     public function parserVersion(): string { return '2.0'; }
 
+    /**
+     * Standard transport-failure → adapter _status mapping, shared by
+     * every source whose episode() falls back to a plain page fetch on
+     * failure. Keeps "reachable but blocked (403)", "rate limited
+     * (429)", "not on this source (404)" and a genuine transport failure
+     * (DNS/timeout/5xx) from ever collapsing into one generic
+     * "fetch_failed" — see PR10 §2 ("do not collapse into FAILED").
+     */
+    public static function classifyFetchStatus(string $errorClass): string
+    {
+        return match ($errorClass) {
+            RmHttpClient::CLASS_NOT_FOUND    => 'missing_episode',
+            RmHttpClient::CLASS_BLOCKED      => 'blocked',
+            RmHttpClient::CLASS_RATE_LIMITED => 'rate_limited',
+            RmHttpClient::CLASS_EMPTY        => 'empty',
+            default                          => 'fetch_failed',
+        };
+    }
+
     public function label(): string { return (string)rmScrapeConfig('sources.' . $this->name() . '.label', $this->name()); }
     public function tier(): int     { return (int)rmScrapeConfig('sources.' . $this->name() . '.tier', 1); }
     public function isEnabled(): bool { return rmScrapeSourceEnabled($this->name()); }

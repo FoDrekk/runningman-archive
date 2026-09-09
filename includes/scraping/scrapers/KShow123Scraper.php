@@ -70,13 +70,7 @@ class KShow123Scraper extends RmScraper
             'bypass_cache' => !empty($ctx['bypass_cache']),
         ]);
         if (!$res->ok) {
-            $status = match ($res->errorClass) {
-                RmHttpClient::CLASS_NOT_FOUND    => 'missing_episode',
-                RmHttpClient::CLASS_BLOCKED      => 'blocked',
-                RmHttpClient::CLASS_RATE_LIMITED => 'rate_limited',
-                default                          => 'fetch_failed',
-            };
-            return $this->emptyResult($url, $status, $res->error,
+            return $this->emptyResult($url, self::classifyFetchStatus($res->errorClass), $res->error,
                 ['_error_class' => $res->errorClass, '_http' => $res->status, '_ms' => $res->ms]);
         }
         $html = (string)$res->body;

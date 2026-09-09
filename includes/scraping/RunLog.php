@@ -30,8 +30,16 @@ class RmScrapeRun
     //                may be stale; this is the one worth chasing
     //   src_failed   could not be reached at all
     //   src_skipped  never contacted (not needed, disabled, cooling down)
+    // The finer buckets below (unchanged/insufficient_evidence/
+    // source_blocked/source_unavailable/needs_review) are a REFINEMENT of
+    // 'skipped'/'failed', not a replacement — every episode that lands in
+    // one of them is ALSO counted in 'skipped' or 'failed' exactly as
+    // before, so existing consumers of those two totals see no change.
+    // See ScrapingEngine::classifyOutcome().
     private array $counts = ['checked'=>0,'added'=>0,'updated'=>0,'skipped'=>0,'failed'=>0,
-                             'src_ok'=>0,'src_empty'=>0,'src_warned'=>0,'src_failed'=>0,'src_skipped'=>0];
+                             'src_ok'=>0,'src_empty'=>0,'src_warned'=>0,'src_failed'=>0,'src_skipped'=>0,
+                             'unchanged'=>0,'insufficient_evidence'=>0,'source_blocked'=>0,
+                             'source_unavailable'=>0,'needs_review'=>0];
     private array $memoryLog = [];      // always kept, even without tables
     private int   $maxMemoryLog = 400;
 
@@ -133,6 +141,20 @@ class RmScrapeRun
         catch (Throwable $e) { return $has = false; }
     }
 
+    /** Do the PR10 fine-grained episode outcome columns exist on this install? */
+    private function hasFineOutcomeColumns(): bool
+    {
+        static $has = null;
+        if ($has !== null) return $has;
+        if ($this->db === null) return $has = false;
+        try {
+            $this->db->query('SELECT episodes_unchanged, episodes_insufficient_evidence,
+                episodes_source_blocked, episodes_source_unavailable, episodes_needs_review
+                FROM scrape_runs LIMIT 1');
+            return $has = true;
+        } catch (Throwable $e) { return $has = false; }
+    }
+
     public function finish(string $status = 'completed', string $notes = ''): array
     {
         $durMs = (int)round((microtime(true) - $this->started) * 1000);
@@ -146,7 +168,10 @@ class RmScrapeRun
         if ($this->ready() && $this->id) {
             try {
                 $detailed = $this->hasDetailedSourceColumns();
+                $fine     = $this->hasFineOutcomeColumns();
                 $extraCols = $detailed ? ', sources_empty=?, sources_warned=?' : '';
+                $fineCols  = $fine ? ', episodes_unchanged=?, episodes_insufficient_evidence=?,
+                    episodes_source_blocked=?, episodes_source_unavailable=?, episodes_needs_review=?' : '';
                 $params = [
                     $status, $durMs,
                     $this->counts['checked'], $this->counts['added'], $this->counts['updated'],
@@ -154,6 +179,13 @@ class RmScrapeRun
                     $this->counts['src_ok'], $this->counts['src_failed'], $this->counts['src_skipped'],
                 ];
                 if ($detailed) { $params[] = $this->counts['src_empty']; $params[] = $this->counts['src_warned']; }
+                if ($fine) {
+                    $params[] = $this->counts['unchanged'];
+                    $params[] = $this->counts['insufficient_evidence'];
+                    $params[] = $this->counts['source_blocked'];
+                    $params[] = $this->counts['source_unavailable'];
+                    $params[] = $this->counts['needs_review'];
+                }
                 $params[] = mb_substr($notes, 0, 2000) ?: null;
                 $params[] = $status;
                 $params[] = $this->id;
@@ -161,7 +193,7 @@ class RmScrapeRun
                 $this->db->prepare(
                     "UPDATE scrape_runs SET status=?, finished_at=NOW(), duration_ms=?,
                         episodes_checked=?, episodes_added=?, episodes_updated=?, episodes_skipped=?,
-                        episodes_failed=?, sources_ok=?, sources_failed=?, sources_skipped=?$extraCols,
+                        episodes_failed=?, sources_ok=?, sources_failed=?, sources_skipped=?$extraCols$fineCols,
                         notes=?, cursor_state=IF(?='completed', NULL, cursor_state)
                       WHERE run_id=?"
                 )->execute($params);

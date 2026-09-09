@@ -224,7 +224,20 @@ class RmThumbnailEngine
             : ['path' => null, 'changed' => false];
     }
 
-    private function absolutePath(?string $webPath): ?string
+    /**
+     * Web/DB path (e.g. "/runningman_archive/thumbnails/2026/ep810.jpg",
+     * with or without a BASE_PATH prefix) → real filesystem path.
+     *
+     * Deliberately NOT $_SERVER['DOCUMENT_ROOT'] + $webPath: DOCUMENT_ROOT
+     * is only correct when the vhost root exactly equals this app's
+     * parent folder, which XAMPP subfolder installs, reverse proxies and
+     * per-vhost DocumentRoot overrides all routinely violate. Anchoring
+     * on __DIR__ instead resolves relative to where these PHP files
+     * actually live on disk, which is true regardless of how the web
+     * server maps URLs — and works identically on Windows, since PHP's
+     * filesystem functions accept forward slashes on every platform.
+     */
+    public function absolutePath(?string $webPath): ?string
     {
         if (!$webPath) return null;
         if (preg_match('~/thumbnails/(\d{4})/(ep\d+\.[a-z0-9]+)$~i', $webPath, $m)) {
@@ -284,6 +297,39 @@ class RmThumbnailEngine
         if (!$this->metaReady()) return;
         try { $this->db->prepare('UPDATE thumbnail_meta SET last_checked_at=NOW() WHERE episode_number=?')->execute([$epNum]); }
         catch (Throwable $e) { }
+    }
+
+    /**
+     * Classify a group of episodes that share one byte-identical image
+     * (they were already grouped by exact content_hash, so "are these
+     * the same file" is settled — this answers "is that legitimate"):
+     *
+     *   PLACEHOLDER_DUPLICATE    tiny file/dimensions — a generic
+     *                            placeholder or missing-image graphic,
+     *                            not a real per-episode photo
+     *   LEGITIMATE_SHARED_IMAGE  a short run of adjacent episode numbers
+     *                            — the real "two-part special shares its
+     *                            key art" case
+     *   LIKELY_WRONG_EPISODE     neither of the above — the case that
+     *                            actually warrants a human's review
+     *
+     * Never deletes anything itself — purely a label for admin/thumbnails.php
+     * to show as a repair suggestion.
+     *
+     * @param int[] $episodeNumbers
+     */
+    public static function classifyDuplicate(array $episodeNumbers, ?int $width, ?int $height, ?int $bytes): string
+    {
+        $eps = array_values(array_unique(array_map('intval', $episodeNumbers)));
+        sort($eps);
+        $span = $eps ? max($eps) - min($eps) : 0;
+        $tinyFile  = $bytes !== null && $bytes > 0 && $bytes < 5000;
+        $tinyImage = $width !== null && $height !== null && $width > 0 && $width < 200 && $height < 200;
+        return match (true) {
+            $tinyFile || $tinyImage => 'PLACEHOLDER_DUPLICATE',
+            count($eps) === ($span + 1) && $span <= 2 => 'LEGITIMATE_SHARED_IMAGE',
+            default => 'LIKELY_WRONG_EPISODE',
+        };
     }
 
     /** Another episode already stores byte-identical image data. */
