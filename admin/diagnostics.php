@@ -301,6 +301,34 @@ if (isset($_GET['a']) && $_GET['a'] === 'mrminspect') {
     exit;
 }
 
+// ── Diagnostic report (section 23): a completed run, exportable ──
+// JSON for a developer, HTML for anyone else — either way, every
+// secret is redacted before the report leaves RmDiagnosticReport at all.
+if (isset($_GET['a']) && $_GET['a'] === 'report') {
+    $format = ($_GET['format'] ?? 'json') === 'html' ? 'html' : 'json';
+    $runId  = isset($_GET['run']) ? (int)$_GET['run'] : null;
+    if ($runId === null) {
+        $latest = RmScrapeRun::latest();
+        $runId = $latest ? (int)$latest['run_id'] : null;
+    }
+    if ($runId === null) {
+        header('Content-Type: application/json');
+        echo json_encode(['ok' => false, 'error' => 'No research run found yet — run something first.']);
+        exit;
+    }
+    $report = RmDiagnosticReport::forRun(getDBSafe(), $runId);
+    $filename = "diagnostic-report-run-$runId." . ($format === 'html' ? 'html' : 'json');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    if ($format === 'html') {
+        header('Content-Type: text/html; charset=utf-8');
+        echo RmDiagnosticReport::toHtml($report);
+    } else {
+        header('Content-Type: application/json');
+        echo RmDiagnosticReport::toJson($report);
+    }
+    exit;
+}
+
 // ── AJAX: cache file listing + clear ─────────────────────────────
 function rmListCacheFiles(): array {
     $files = [];
@@ -500,6 +528,22 @@ $activeSources     = array_keys(RmSourceRegistry::instance()->active(true));
     <button class="btn btn-sm" onclick="runMrmInspect()">▶ Inspect Raw HTML</button>
   </div>
   <div id="mrmInspectResult" style="margin-top:.8rem"></div>
+</div>
+
+<!-- Section D3: Diagnostic Report Export -->
+<div class="ap">
+  <div class="sh">Diagnostic Report</div>
+  <p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.8rem">
+    A complete, sanitised snapshot of one research run — system info, every source's result,
+    field-by-field decisions, AI activity, database changes and errors. JSON for debugging,
+    HTML to read or attach to a bug report. Every secret is redacted automatically.
+  </p>
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+    <span style="font-size:.8rem;color:rgba(255,255,255,.4)">Run ID (blank = latest):</span>
+    <input type="number" id="reportRunId" placeholder="latest" style="width:110px;padding:.4rem .7rem;background:#141c2c;border:1px solid rgba(41,171,226,.14);border-radius:7px;color:#eef2f8;font-size:.82rem;outline:none">
+    <a class="btn btn-sm" id="btnReportJson" href="#" onclick="return downloadReport('json')">⬇ Download JSON</a>
+    <a class="btn btn-dark btn-sm" id="btnReportHtml" href="#" onclick="return downloadReport('html')">⬇ Download HTML</a>
+  </div>
 </div>
 
 <!-- Section E: Cache Management -->
@@ -742,6 +786,12 @@ async function loadCacheList(){
 async function clearCache(file){
   await fetch(BP+'/admin/diagnostics.php?a=cacheclear&file='+encodeURIComponent(file));
   loadCacheList();
+}
+function downloadReport(format){
+  var run = document.getElementById('reportRunId').value.trim();
+  var url = BP + '/admin/diagnostics.php?a=report&format=' + format + (run ? '&run=' + encodeURIComponent(run) : '');
+  window.location.href = url;
+  return false;
 }
 window.addEventListener('load', function(){ runNetCheck(); loadCacheList(); });
 </script>

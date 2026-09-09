@@ -51,6 +51,9 @@ jobs:
       - name: AI reasoning — grounding, synopsis decisions, thresholds
         run: php tests/ai.php
 
+      - name: Diagnostic report — secret sanitisation and rendering
+        run: php tests/diagnostic_report.php
+
   database:
     name: Migration and integration (MariaDB)
     runs-on: ubuntu-latest
@@ -103,6 +106,9 @@ jobs:
 
       - name: AI reasoning — field locks and the AI generation log, with a live DB
         run: php tests/ai.php
+
+      - name: Diagnostic report — a real run, with a live DB
+        run: php tests/diagnostic_report.php
 
       # The JSON contract is checked against a server started with
       # display_errors ON, because that is the configuration in which a
