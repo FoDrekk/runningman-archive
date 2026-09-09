@@ -280,10 +280,12 @@ function toast(m){var t=document.getElementById('toast');if(!t){t=document.creat
 
 window.addEventListener('load',()=>setTimeout(checkNew,700));
 
-var STATUS_COLOR={ok:'#86efac',unavailable:'#f59e0b',disabled:'rgba(255,255,255,.25)',no_signal:'rgba(255,255,255,.35)'};
-var STATUS_LABEL={ok:null,unavailable:'unavailable',disabled:'disabled',no_signal:'no signal'};
-var DECISION_COLOR={missing_episodes:'#29ABE2',source_disagreement:'#fcd34d',source_unavailable:'#fcd34d',insufficient_evidence:'#fcd34d',up_to_date:'#86efac'};
-var DECISION_ICON={missing_episodes:'🆕',source_disagreement:'⚠',source_unavailable:'⚠',insufficient_evidence:'⚠',up_to_date:'✓'};
+var STATUS_COLOR={ok:'#86efac',blocked:'#f87171',robots_denied:'#94a3b8',rate_limited:'#fb923c',
+  down:'#f87171',cooldown:'#fcd34d',disabled:'rgba(255,255,255,.25)',no_signal:'rgba(255,255,255,.35)'};
+var STATUS_LABEL={ok:null,blocked:'blocked',robots_denied:'robots.txt denied',rate_limited:'rate limited',
+  down:'down',cooldown:'cooldown',disabled:'disabled',no_signal:'no signal'};
+var DECISION_COLOR={MISSING:'#29ABE2',SOURCE_DISAGREEMENT:'#fcd34d',SOURCE_UNAVAILABLE:'#fcd34d',INSUFFICIENT_EVIDENCE:'#fcd34d',ALREADY_SYNCED:'#86efac'};
+var DECISION_ICON={MISSING:'🆕',SOURCE_DISAGREEMENT:'⚠',SOURCE_UNAVAILABLE:'⚠',INSUFFICIENT_EVIDENCE:'⚠',ALREADY_SYNCED:'✓'};
 
 function checkNew(){
   var btn=document.getElementById('btnCheck');
@@ -306,7 +308,8 @@ function checkNew(){
         ss.innerHTML=Object.keys(d.source_status).map(function(k){
           var s=d.source_status[k], color=STATUS_COLOR[s.status]||'rgba(255,255,255,.35)';
           var text=s.status==='ok' ? 'EP'+pad(s.value) : (STATUS_LABEL[s.status]||s.status);
-          return '<span style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:5px;padding:3px 8px;font-size:.7rem;color:'+color+'"><strong style="color:rgba(255,255,255,.5)">'+s.label+':</strong> '+text+'</span>';
+          var title=s.reason ? ' title="'+s.reason.replace(/"/g,'&quot;')+(s.cooldown_until?' (until '+s.cooldown_until+')':'')+'"' : '';
+          return '<span'+title+' style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:5px;padding:3px 8px;font-size:.7rem;color:'+color+';cursor:'+(s.reason?'help':'default')+'"><strong style="color:rgba(255,255,255,.5)">'+s.label+':</strong> '+text+'</span>';
         }).join('');
       } else ssw.style.display='none';
 
@@ -316,21 +319,29 @@ function checkNew(){
       dm.innerHTML='<span style="color:'+color+'">'+icon+' '+(d.decision_note||'')+'</span>';
       bb.innerHTML='';
 
+      // "Quick" is never db_max+1 by assumption — it only ever targets a
+      // candidate episode whose air_date live sources actually confirmed
+      // (d.missing_aired). No evidence, no button — never an invented
+      // episode number.
       var quick=document.getElementById('btnQuick');
-      if(d.decision==='missing_episodes' && d.missing_aired.length){
+      if(d.decision==='MISSING' && d.missing_aired.length){
         bb.innerHTML=d.missing_aired.slice(0,10).map(function(e){
           return '<button onclick="fetchEp('+e.episode+')" class="btn btn-sm">⚡ EP'+pad(e.episode)+'<span style="opacity:.6;font-weight:400"> · '+e.air_date+(e.confidence?' · '+e.confidence:'')+'</span></button>';
         }).join('');
         quick.style.display='';
+        quick.disabled=false;
         quick.textContent='⚡ Quick: EP'+pad(d.missing_aired[0].episode);
         quick.onclick=function(){fetchEp(d.missing_aired[0].episode)};
         step(2); fetchEp(d.missing_aired[0].episode);
       } else {
-        quick.style.display='none';
+        quick.style.display='';
+        quick.disabled=true;
+        quick.onclick=null;
+        quick.textContent='No verified next episode found';
         step(1);
       }
 
-      if(d.insufficient_evidence && d.insufficient_evidence.length && d.decision!=='missing_episodes'){
+      if(d.insufficient_evidence && d.insufficient_evidence.length && d.decision!=='MISSING'){
         bb.innerHTML='<span style="color:rgba(255,255,255,.35);font-size:.78rem;align-self:center">Unconfirmed candidate(s): '+d.insufficient_evidence.map(pad).join(', ')+' — use manual entry if you can verify the air date yourself.</span>';
       }
     }).catch(()=>{btn.innerHTML='🔍 Check for New EPs';btn.disabled=false;});

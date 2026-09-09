@@ -29,6 +29,17 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     episodes_updated  INT          NOT NULL DEFAULT 0,
     episodes_skipped  INT          NOT NULL DEFAULT 0,
     episodes_failed   INT          NOT NULL DEFAULT 0,
+    -- PR10: a REFINEMENT of skipped/failed above, not a replacement — every
+    -- episode counted here is also counted in one of those two. Lets the
+    -- Weekly Update report say WHY something was skipped/failed instead of
+    -- one undifferentiated bucket for "coverage gap", "every source
+    -- blocked/cooling down", "transport unreachable" and "selectors
+    -- probably stale" alike.
+    episodes_unchanged             INT NOT NULL DEFAULT 0,
+    episodes_insufficient_evidence INT NOT NULL DEFAULT 0,
+    episodes_source_blocked        INT NOT NULL DEFAULT 0,
+    episodes_source_unavailable    INT NOT NULL DEFAULT 0,
+    episodes_needs_review          INT NOT NULL DEFAULT 0,
     -- Source outcomes are counted separately because they mean different
     -- things: ok = gave data · empty = healthy but has nothing for this
     -- episode · warned = reachable but parsed nothing (stale selectors)
@@ -220,6 +231,15 @@ CREATE TABLE IF NOT EXISTS episode_alt_titles (
 ALTER TABLE scrape_runs
     ADD COLUMN IF NOT EXISTS sources_empty  INT NOT NULL DEFAULT 0 AFTER sources_ok,
     ADD COLUMN IF NOT EXISTS sources_warned INT NOT NULL DEFAULT 0 AFTER sources_empty;
+
+-- PR10: fine-grained episode outcome columns (see the comment on the
+-- CREATE TABLE above). Same additive/idempotent pattern.
+ALTER TABLE scrape_runs
+    ADD COLUMN IF NOT EXISTS episodes_unchanged             INT NOT NULL DEFAULT 0 AFTER episodes_failed,
+    ADD COLUMN IF NOT EXISTS episodes_insufficient_evidence INT NOT NULL DEFAULT 0 AFTER episodes_unchanged,
+    ADD COLUMN IF NOT EXISTS episodes_source_blocked        INT NOT NULL DEFAULT 0 AFTER episodes_insufficient_evidence,
+    ADD COLUMN IF NOT EXISTS episodes_source_unavailable    INT NOT NULL DEFAULT 0 AFTER episodes_source_blocked,
+    ADD COLUMN IF NOT EXISTS episodes_needs_review          INT NOT NULL DEFAULT 0 AFTER episodes_source_unavailable;
 
 -- Seed the health table so every registered source has a row from day one.
 -- PR #4 source policy: MyDramaList/TMDB/Wikidata/AsianWiki were removed;

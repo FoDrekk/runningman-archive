@@ -192,6 +192,24 @@ $resumable   = RmScrapeRun::resumable(30);
     <?= (int)$c['checked'] ?> checked · <?= (int)$c['added'] ?> added · <?= (int)$c['updated'] ?> updated ·
     <?= (int)$c['skipped'] ?> skipped · <?= (int)$c['failed'] ?> failed
     · <?= round((int)$runSummary['duration_ms'] / 1000, 1) ?>s
+    <?php
+    // "Skipped"/"failed" above are never left as one undifferentiated
+    // bucket — every episode counted there is ALSO counted in exactly
+    // one of these, so an operator can tell "nothing new" apart from
+    // "every source is blocked" apart from "selectors look stale".
+    $fine = [
+        'unchanged'             => 'unchanged',
+        'insufficient_evidence' => 'insufficient evidence',
+        'source_blocked'        => 'source blocked/cooldown',
+        'source_unavailable'    => 'source unavailable',
+        'needs_review'          => 'needs review (parser)',
+    ];
+    $fineParts = [];
+    foreach ($fine as $k => $label) if (!empty($c[$k])) $fineParts[] = (int)$c[$k] . ' ' . $label;
+    ?>
+    <?php if ($fineParts): ?>
+    <br><span style="opacity:.7;font-size:.78rem">Why: <?= implode(' · ', $fineParts) ?></span>
+    <?php endif; ?>
     <br><span style="opacity:.7;font-size:.78rem">Sources: <?= (int)$c['src_ok'] ?> gave data,
       <?= (int)$c['src_empty'] ?> healthy but had nothing for those episodes,
       <?= (int)$c['src_warned'] ?> reachable but parsed nothing,

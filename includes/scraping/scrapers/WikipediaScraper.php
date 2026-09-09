@@ -36,21 +36,48 @@ function wikiClean(string $html): string {
 // Every fetch below MUST target a specific year.
 
 // Last transport-level failure from rmWikiFetchYearPage(), so the adapter
-// can report WHY the page was unavailable (DNS, proxy, 404, timeout…)
-// rather than collapsing every cause into "unknown failure".
+// can report WHY the page was unavailable (DNS, proxy, 404, timeout,
+// robots.txt…) rather than collapsing every cause into "unknown failure".
 function rmWikiLastFetchFailure(): ?array {
     return $GLOBALS['__rm_wiki_fetch_failure'] ?? null;
 }
 
+/**
+ * Which MediaWiki transport actually produced the last successful fetch —
+ * 'mediawiki_rest_api' or 'mediawiki_action_api' — recorded as
+ * provenance (PR10 §3: "record provenance such as source=wikipedia,
+ * transport=mediawiki_api").
+ */
+function rmWikiLastTransport(): ?string {
+    return $GLOBALS['__rm_wiki_transport'] ?? null;
+}
+
 // ── Wikipedia: fetch & cache ONE YEAR'S episode page ───────────
-// Same contract as before (kept for admin/diagnostics.php), now
-// routed through the shared HTTP client + cache.
+// Two official, machine-readable MediaWiki/Wikimedia endpoints are tried
+// in turn — never HTML page-scraping, never a bypass of robots.txt
+// (RmHttpClient checks robots.txt on every attempt here exactly as it
+// does for every other source):
+//
+//   1. Wikimedia REST API — /api/rest_v1/page/html/{title}, Parsoid HTML
+//      of the whole article. This is a distinct API surface from the
+//      legacy /w/ action API, and Wikipedia's robots.txt has repeatedly
+//      disallowed /w/ for generic user agents while leaving /api/ open —
+//      so this is tried FIRST as the more robots-friendly path.
+//   2. MediaWiki action API — /w/api.php?action=parse, the original
+//      transport. Kept as a fallback for the (uncommon) case where a
+//      mirror/install's robots.txt is configured the other way around.
+//
+// Both return the SAME kind of thing this adapter has always consumed —
+// rendered article HTML — so rmWikiParseHtml() (the wikitable parser,
+// preserved verbatim below) needs no changes either way.
 function rmWikiFetchYearPage(int $year, bool $bypassCache = false): ?string {
     $http  = RmHttpClient::instance();
     $GLOBALS['__rm_wiki_fetch_failure'] = null;
+    $GLOBALS['__rm_wiki_transport']     = null;
     $isCurrent = $year >= (int)date('Y');
     $ttl   = $isCurrent ? (int)rmScrapeConfig('cache.ttl_index', 1800)
                         : (int)rmScrapeConfig('cache.ttl_reference', 604800);
+    $delayMs = (int)rmScrapeConfig('sources.wikipedia.delay_ms', 600);
 
     // 2010 is sometimes the exception — Wikipedia's earliest seasons can
     // live on the un-suffixed page if the show hadn't been split into
@@ -58,29 +85,57 @@ function rmWikiFetchYearPage(int $year, bool $bypassCache = false): ?string {
     $titles = ["List of Running Man episodes ($year)"];
     if ($year === 2010) $titles[] = "List of Running Man episodes";
 
+    $failures = [];
     foreach ($titles as $title) {
-        $url = 'https://en.wikipedia.org/w/api.php?' . http_build_query([
+        $encoded = rawurlencode(str_replace(' ', '_', $title));
+
+        // 1. REST API — plain HTML body, not a JSON envelope.
+        $restUrl = "https://en.wikipedia.org/api/rest_v1/page/html/$encoded";
+        $res = $http->get($restUrl, [
+            'timeout'      => 20,
+            'cache_ttl'    => $ttl,
+            'cache_key'    => "wiki:rest:$year:" . md5($title),
+            'cache_type'   => 'api',
+            'bypass_cache' => $bypassCache,
+            'delay_ms'     => $delayMs,
+            'min_bytes'    => 2000,
+        ]);
+        if ($res->ok && $res->body && strlen($res->body) > 2000) {
+            $GLOBALS['__rm_wiki_transport'] = 'mediawiki_rest_api';
+            return $res->body;
+        }
+        if (!$res->ok) $failures[] = ['error' => $res->error, 'class' => $res->errorClass, 'http' => $res->status];
+
+        // 2. Action API fallback — the original transport.
+        $actionUrl = 'https://en.wikipedia.org/w/api.php?' . http_build_query([
             'action'=>'parse','page'=>$title,
             'prop'=>'text','format'=>'json','disablelimitreport'=>1,'disableeditsection'=>1,
         ]);
-        [$data, $res] = $http->getJson($url, [
+        [$data, $res2] = $http->getJson($actionUrl, [
             'timeout'      => 20,
             'cache_ttl'    => $ttl,
             'cache_key'    => "wiki:year:$year:" . md5($title),
             'cache_type'   => 'api',
             'bypass_cache' => $bypassCache,
-            'delay_ms'     => (int)rmScrapeConfig('sources.wikipedia.delay_ms', 600),
+            'delay_ms'     => $delayMs,
         ]);
-        if (!$res->ok) {
-            $GLOBALS['__rm_wiki_fetch_failure'] = ['error' => $res->error, 'class' => $res->errorClass, 'http' => $res->status];
+        if (!$res2->ok) {
+            $failures[] = ['error' => $res2->error, 'class' => $res2->errorClass, 'http' => $res2->status];
             continue;
         }
         if (!is_array($data) || isset($data['error'])) continue;   // "missingtitle" etc — try next candidate
         $html = $data['parse']['text']['*'] ?? null;
         // A real year page with ~50 episode rows is always several KB.
         // Anything under 2000 chars is a stub/redirect, not real data.
-        if ($html && strlen($html) > 2000) return $html;
+        if ($html && strlen($html) > 2000) {
+            $GLOBALS['__rm_wiki_transport'] = 'mediawiki_action_api';
+            return $html;
+        }
     }
+    // Report the LAST failure — the action-API attempt for the real
+    // target year, the closest thing to "what actually happened" when
+    // every candidate title/transport was tried and none worked.
+    if ($failures) $GLOBALS['__rm_wiki_fetch_failure'] = end($failures);
     return null;
 }
 
@@ -515,6 +570,9 @@ class WikipediaScraper extends RmScraper
         $out['_error']       = null;
         $out['_error_class'] = RmHttpClient::CLASS_OK;
         $out['_hash']        = RmNormalizer::hash(json_encode($ep, JSON_UNESCAPED_UNICODE));
+        // Provenance: which MediaWiki/Wikimedia transport actually served
+        // this — 'mediawiki_rest_api' or 'mediawiki_action_api'.
+        $out['_parser_version'] = $this->parserVersion() . '+' . (rmWikiLastTransport() ?? 'cached');
         return $out;
     }
 

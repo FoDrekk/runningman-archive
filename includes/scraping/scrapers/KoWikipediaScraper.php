@@ -20,6 +20,7 @@ class KoWikipediaScraper extends RmScraper
 {
     private ?string $lastFetchError = null;
     private ?string $lastFetchClass = null;
+    private ?string $lastTransport  = null;
 
     public function name(): string { return 'kowiki'; }
     public function parserVersion(): string { return 'kowiki-1.0'; }
@@ -47,19 +48,34 @@ class KoWikipediaScraper extends RmScraper
         }
 
         $html = null;
+        $ttl  = $year >= (int)date('Y') ? (int)rmScrapeConfig('cache.ttl_index', 1800) : (int)rmScrapeConfig('cache.ttl_reference', 604800);
         // Track WHY the page is unavailable: "could not reach ko.wikipedia"
         // and "reached it, no episode table there" are different problems
         // and must not both be reported as an empty result.
         $this->lastFetchError = null;
         $this->lastFetchClass = null;
+        $this->lastTransport  = null;
         foreach ($this->pageTitles($year) as $title) {
+            // REST API first — a distinct path from /w/, tried before the
+            // legacy action API for the same robots.txt reason as the
+            // English adapter (see WikipediaScraper::rmWikiFetchYearPage).
+            $encoded = rawurlencode(str_replace(' ', '_', $title));
+            $rres = $this->get("https://ko.wikipedia.org/api/rest_v1/page/html/$encoded", [
+                'timeout' => 20, 'cache_ttl' => $ttl, 'cache_key' => "kowiki:rest:$year:" . md5($title),
+                'bypass_cache' => $bypass, 'min_bytes' => 2000,
+            ]);
+            if ($rres->ok && $rres->body && strlen($rres->body) > 2000) {
+                $html = $rres->body; $this->lastTransport = 'mediawiki_rest_api'; break;
+            }
+            if (!$rres->ok) { $this->lastFetchError = $rres->error; $this->lastFetchClass = $rres->errorClass; }
+
             $url = 'https://ko.wikipedia.org/w/api.php?' . http_build_query([
                 'action'=>'parse','page'=>$title,'prop'=>'text','format'=>'json',
                 'disablelimitreport'=>1,'disableeditsection'=>1,
             ]);
             [$data, $res] = $this->getJson($url, [
                 'timeout'   => 20,
-                'cache_ttl' => $year >= (int)date('Y') ? (int)rmScrapeConfig('cache.ttl_index', 1800) : (int)rmScrapeConfig('cache.ttl_reference', 604800),
+                'cache_ttl' => $ttl,
                 'cache_key' => "kowiki:page:$year:" . md5($title),
                 'bypass_cache' => $bypass,
             ]);
@@ -70,7 +86,7 @@ class KoWikipediaScraper extends RmScraper
             }
             if (!is_array($data) || isset($data['error'])) continue;
             $candidate = $data['parse']['text']['*'] ?? null;
-            if ($candidate && strlen($candidate) > 2000) { $html = $candidate; break; }
+            if ($candidate && strlen($candidate) > 2000) { $html = $candidate; $this->lastTransport = 'mediawiki_action_api'; break; }
         }
         if ($html === null) return [];
 
@@ -178,6 +194,7 @@ class KoWikipediaScraper extends RmScraper
         $out['_error']       = null;
         $out['_error_class'] = RmHttpClient::CLASS_OK;
         $out['_hash']        = RmNormalizer::hash(json_encode($ep, JSON_UNESCAPED_UNICODE));
+        $out['_parser_version'] = $this->parserVersion() . '+' . ($this->lastTransport ?? 'cached');
         return $out;
     }
 

@@ -128,13 +128,7 @@ class MyRunningManScraper extends RmScraper
 
     private function statusFor(RmHttpResponse $res): string
     {
-        return match ($res->errorClass) {
-            RmHttpClient::CLASS_NOT_FOUND    => 'missing_episode',
-            RmHttpClient::CLASS_BLOCKED      => 'blocked',
-            RmHttpClient::CLASS_RATE_LIMITED => 'rate_limited',
-            RmHttpClient::CLASS_EMPTY        => 'empty',
-            default                          => 'fetch_failed',
-        };
+        return self::classifyFetchStatus($res->errorClass);
     }
 }
 
@@ -162,8 +156,12 @@ class MyRMtvScraper extends RmScraper
             'bypass_cache' => !empty($ctx['bypass_cache']),
         ]);
         if (!$res->ok) {
-            return $this->emptyResult($url,
-                $res->errorClass === RmHttpClient::CLASS_NOT_FOUND ? 'missing_episode' : 'fetch_failed',
+            // Shared with MyRunningManScraper/KShow123Scraper — a 403 is
+            // "blocked" (bot filtering, enters cooldown), not the same
+            // generic "fetch_failed" as a DNS/timeout/5xx transport
+            // failure. Collapsing them together was hiding exactly the
+            // distinction PR10 asks the UI to preserve.
+            return $this->emptyResult($url, self::classifyFetchStatus($res->errorClass),
                 $res->error, ['_error_class' => $res->errorClass, '_http' => $res->status, '_ms' => $res->ms]);
         }
         $html = (string)$res->body;
