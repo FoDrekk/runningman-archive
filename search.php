@@ -1,11 +1,13 @@
 <?php
 require_once __DIR__ . '/includes/functions.php';
+require_once __DIR__ . '/includes/components.php';
 
 $q         = trim($_GET['q']      ?? '');
 $year      = (int)($_GET['year']  ?? 0);
 $themeId   = (int)($_GET['theme_id'] ?? 0);
 $isSpecial = isset($_GET['special']) ? (int)$_GET['special'] : null;
 $specType  = trim($_GET['type']   ?? '');
+$sort      = ($_GET['sort'] ?? 'newest') === 'oldest' ? 'oldest' : 'newest';
 $page      = max(1,(int)($_GET['page'] ?? 1));
 
 $filters = [];
@@ -14,6 +16,7 @@ if ($year)               $filters['year']        = $year;
 if ($themeId)            $filters['theme_id']    = $themeId;
 if ($isSpecial !== null) $filters['is_special']  = $isSpecial;
 if ($specType)           $filters['special_type']= $specType;
+if ($sort === 'oldest')  $filters['sort']        = 'oldest';
 
 $result   = getEpisodeList($page, 24, $filters);
 $episodes = $result['episodes'];
@@ -25,6 +28,9 @@ if ($q)              $pageTitle = "Search: $q";
 elseif ($year)       $pageTitle = "$year Episodes";
 elseif ($isSpecial===1) $pageTitle = "Special Episodes";
 else                 $pageTitle = "All Episodes";
+$pageDescription = $q
+    ? "Running Man Archive search results for \"$q\"."
+    : 'Browse every Running Man episode by year, theme and special — searchable by title, guest, mission and location.';
 
 include __DIR__ . '/includes/header.php';
 $bp2 = bp();
@@ -46,18 +52,20 @@ $bp2 = bp();
   <?php endif; ?>
 </div>
 
-<form method="GET" action="<?= $bp2 ?>/search.php">
+<form method="GET" action="<?= $bp2 ?>/search.php" role="search">
   <div class="search-wrap" style="margin-bottom:1rem">
-    <span class="search-icon">🔍</span>
-    <input type="text" name="q" value="<?= h($q) ?>" placeholder="Search episodes…" autocomplete="off">
+    <span class="search-icon" aria-hidden="true">🔍</span>
+    <label for="searchQ" class="sr-only">Search episodes</label>
+    <input type="text" id="searchQ" name="q" value="<?= h($q) ?>" placeholder="Search episodes…" autocomplete="off">
     <?php if ($q||$year||$themeId||$isSpecial!==null): ?>
       <a href="<?= $bp2 ?>/search.php" class="btn btn-ghost btn-sm" style="margin:.38rem 0 .38rem .38rem">✕</a>
     <?php endif; ?>
     <button type="submit">Search</button>
   </div>
   <div class="filter-bar" style="margin-bottom:1.5rem">
-    <span class="filter-label">Filter:</span>
-    <select name="year">
+    <span class="filter-label" id="filterLabel">Filter:</span>
+    <label for="filterYear" class="sr-only">Year</label>
+    <select name="year" id="filterYear" aria-labelledby="filterLabel">
       <option value="">All Years</option>
       <?php foreach (array_reverse($years) as $y): if (!$y['total_episodes']) continue; ?>
       <option value="<?= $y['year_label'] ?>" <?= ($year==$y['year_label'])?'selected':'' ?>>
@@ -65,7 +73,8 @@ $bp2 = bp();
       </option>
       <?php endforeach; ?>
     </select>
-    <select name="theme_id">
+    <label for="filterTheme" class="sr-only">Theme</label>
+    <select name="theme_id" id="filterTheme">
       <option value="">All Themes</option>
       <?php foreach ($themes as $t): ?>
       <option value="<?= $t['theme_id'] ?>" <?= ($themeId==$t['theme_id'])?'selected':'' ?>>
@@ -73,48 +82,25 @@ $bp2 = bp();
       </option>
       <?php endforeach; ?>
     </select>
-    <select name="special">
+    <label for="filterSpecial" class="sr-only">Special episodes filter</label>
+    <select name="special" id="filterSpecial">
       <option value="">All Episodes</option>
       <option value="1" <?= ($isSpecial===1)?'selected':'' ?>>Specials Only</option>
       <option value="0" <?= ($isSpecial===0)?'selected':'' ?>>Regular Only</option>
+    </select>
+    <select name="sort" aria-label="Sort order">
+      <option value="newest" <?= $sort==='newest'?'selected':'' ?>>Newest First</option>
+      <option value="oldest" <?= $sort==='oldest'?'selected':'' ?>>Oldest First</option>
     </select>
   </div>
 </form>
 
 <?php if ($pg['total']===0): ?>
-<div class="empty-state">
-  <span class="ei">🏃</span>
-  <h3>No episodes found</h3>
-  <p>Try different search terms or clear your filters.</p>
-  <a href="<?= $bp2 ?>/search.php" class="btn">Clear filters</a>
-</div>
+<?= renderEmptyState('🏃', 'No episodes found', 'Try different search terms or clear your filters.',
+    '<a href="' . h($bp2) . '/search.php" class="btn">Clear filters</a>') ?>
 <?php else: ?>
 <div class="ep-grid">
-<?php foreach ($episodes as $ep):
-  $n = str_pad($ep['episode_number'],3,'0',STR_PAD_LEFT);
-  $src = thumbSrc($ep);
-  $dispTitle = $ep['title'] ?? '';
-  if (preg_match('/^Episode\s*#\d+\s*-\s*(.+)$/i',$dispTitle,$m)) $dispTitle=$m[1];
-  elseif (preg_match('/^Episode\s*#\d+$/i',$dispTitle)) $dispTitle='Running Man';
-?>
-<div class="card ep-card" data-href="<?= episodeUrl($ep['episode_number']) ?>" tabindex="0">
-  <div class="ep-thumb">
-    <?php if ($src): ?><img src="<?= h($src) ?>" alt="Episode #<?= $n ?>" loading="lazy">
-    <?php else: ?><div class="thumb-ph">R</div><?php endif; ?>
-    <span class="ep-num-badge">EP<?= $n ?></span>
-  </div>
-  <div class="ep-body">
-    <span class="ep-num">Episode #<?= $n ?></span>
-    <div class="ep-title"><?= h($dispTitle ?: 'Running Man') ?></div>
-    <div class="ep-date"><?= h($ep['air_date'] ?? '') ?></div>
-    <div class="ep-meta">
-      <?php if ($ep['is_special']): ?><span class="badge b-yel">⭐ Special</span><?php endif; ?>
-      <?php if ($ep['theme_name']): ?><span class="badge b-gray"><?= h($ep['theme_name']) ?></span><?php endif; ?>
-      <?php if ($ep['verification_required']): ?><span class="badge b-warn">Unverified</span><?php endif; ?>
-    </div>
-  </div>
-</div>
-<?php endforeach; ?>
+<?php foreach ($episodes as $ep): echo renderEpisodeCard($ep); endforeach; ?>
 </div>
 
 <?php if ($pg['total_pages']>1):
@@ -125,7 +111,7 @@ $bp2 = bp();
   // would reset back to showing all episodes. Use the same !==null
   // callback as pgUrl() below, so only genuinely-unset filters are
   // dropped and "0" survives.
-  $base = array_filter(['q'=>$q,'year'=>$year?:null,'theme_id'=>$themeId?:null,'special'=>$isSpecial!==null?(string)$isSpecial:null], fn($v)=>$v!==null);
+  $base = array_filter(['q'=>$q,'year'=>$year?:null,'theme_id'=>$themeId?:null,'special'=>$isSpecial!==null?(string)$isSpecial:null,'sort'=>$sort==='oldest'?'oldest':null], fn($v)=>$v!==null);
   function pgUrl(array $b,int $p): string { global $bp2; return $bp2.'/search.php?'.http_build_query(array_merge(array_filter($b,fn($v)=>$v!==null),['page'=>$p])); }
   $c=$pg['current_page']; $tot=$pg['total_pages'];
 ?>

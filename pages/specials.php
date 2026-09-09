@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/../includes/functions.php';
+require_once __DIR__ . '/../includes/components.php';
 
 $type = trim($_GET['type'] ?? '');
 $page = max(1,(int)($_GET['page'] ?? 1));
@@ -28,6 +29,7 @@ $result   = getEpisodeList($page, 24, $filters);
 $episodes = $result['episodes'];
 $pg       = $result['pagination'];
 $pageTitle= ($type && isset($types[$type])) ? $types[$type]['label'].' Specials' : 'Special Episodes';
+$pageDescription = 'Chuseok, overseas trips, milestones, farewells and other special Running Man episodes.';
 
 include __DIR__ . '/../includes/header.php';
 $bp2 = bp();
@@ -87,33 +89,7 @@ if ($titleSpecials):
   <?= number_format($pg['total']) ?> episode<?= $pg['total']!==1?'s':'' ?>
 </div>
 <div class="ep-grid">
-<?php foreach ($episodes as $ep):
-  $n   = str_pad($ep['episode_number'],3,'0',STR_PAD_LEFT);
-  $src = thumbSrc($ep);
-  $dispTitle = $ep['title'] ?? '';
-  if (preg_match('/^Episode\s*#\d+\s*-\s*(.+)$/i',$dispTitle,$m)) $dispTitle=$m[1];
-  elseif (preg_match('/^Episode\s*#\d+$/i',$dispTitle)) $dispTitle='Running Man';
-?>
-<div class="card ep-card" data-href="<?= episodeUrl($ep['episode_number']) ?>" tabindex="0">
-  <div class="ep-thumb">
-    <?php if ($src): ?><img src="<?= h($src) ?>" alt="Episode #<?= $n ?>" loading="lazy">
-    <?php else: ?><div class="thumb-ph">R</div><?php endif; ?>
-    <span class="ep-num-badge">EP<?= $n ?></span>
-  </div>
-  <div class="ep-body">
-    <span class="ep-num">Episode #<?= $n ?></span>
-    <div class="ep-title"><?= h($dispTitle) ?></div>
-    <div class="ep-date"><?= h($ep['air_date'] ?? '') ?></div>
-    <div class="ep-meta">
-      <?php if ($ep['special_type']): ?>
-      <span class="badge b-yel">⭐ <?= h(ucwords(str_replace('_',' ',$ep['special_type']))) ?></span>
-      <?php else: ?>
-      <span class="badge b-yel">⭐ Special</span>
-      <?php endif; ?>
-    </div>
-  </div>
-</div>
-<?php endforeach; ?>
+<?php foreach ($episodes as $ep): echo renderEpisodeCard($ep); endforeach; ?>
 </div>
 
 <?php if ($pg['total_pages']>1):
