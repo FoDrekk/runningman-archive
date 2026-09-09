@@ -70,6 +70,58 @@ if (isset($_GET['a']) && $_GET['a']==='grab' && isset($_GET['ep'])) {
     exit;
 }
 
+// AJAX — bulk thumbnail quality check (PR #4, section 26). Re-runs the
+// SAME validation used at download time (RmThumbnailEngine::verify(),
+// which itself calls RmValidator::imageBytes()) against every thumbnail
+// already on disk, so "corrupted since the last check" and "was fine on
+// arrival" are told apart. Read-only except for the status column of
+// thumbnail_meta, which just records what this check found — nothing
+// about an episode's actual thumbnail assignment changes.
+if (isset($_GET['a']) && $_GET['a'] === 'quality') {
+    header('Content-Type: application/json');
+    set_time_limit(120);
+    if (ob_get_level() > 0) ob_clean();
+    try {
+        require_once __DIR__ . '/../includes/scraping/bootstrap.php';
+        $te = new RmThumbnailEngine($db);
+        $eps = $db->query(
+            "SELECT episode_number FROM episodes WHERE thumbnail_id IS NOT NULL ORDER BY episode_number"
+        )->fetchAll(PDO::FETCH_COLUMN);
+
+        $byStatus = ['ok' => 0, 'broken' => 0, 'missing' => 0];
+        $bad = [];
+        foreach ($eps as $ep) {
+            $r = $te->verify((int)$ep);
+            $status = $r['status'] ?? ($r['ok'] ? 'ok' : 'broken');
+            $byStatus[$status] = ($byStatus[$status] ?? 0) + 1;
+            if (!$r['ok']) $bad[] = ['episode' => (int)$ep, 'status' => $status, 'reason' => $r['reason']];
+        }
+
+        // Duplicate images across episodes — only meaningful once
+        // thumbnail_meta (content_hash) is installed.
+        $duplicates = [];
+        try {
+            $duplicates = $db->query(
+                "SELECT content_hash, GROUP_CONCAT(episode_number ORDER BY episode_number) episodes, COUNT(*) c
+                   FROM thumbnail_meta WHERE content_hash IS NOT NULL AND content_hash <> ''
+                  GROUP BY content_hash HAVING c > 1"
+            )->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) { /* thumbnail_meta not installed — skip */ }
+
+        $missingThumb = (int)$db->query(
+            "SELECT COUNT(*) FROM episodes WHERE thumbnail_id IS NULL"
+        )->fetchColumn();
+
+        echo json_encode([
+            'ok' => true, 'checked' => count($eps), 'by_status' => $byStatus,
+            'bad' => $bad, 'duplicates' => $duplicates, 'no_thumbnail_at_all' => $missingThumb,
+        ]);
+    } catch (Throwable $e) {
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
 // AJAX — actually scan disk and correct the DB verified flag to match
 // reality. The DB flag alone has drifted from the real files before
 // (e.g. records created before a download genuinely succeeded), which
@@ -193,12 +245,53 @@ $pct      = $total > 0 ? round($verified/$total*100) : 0;
   <div id="bLog" style="max-height:200px;overflow-y:auto;font-size:.72rem"></div>
 </div>
 
+<!-- Thumbnail Quality Check (PR #4, section 26) -->
+<div class="ap">
+  <div class="sh">Thumbnail Quality Check</div>
+  <p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.8rem">
+    Re-validates every thumbnail already on disk — missing file, corrupted image, wrong dimensions —
+    and finds duplicate images across episodes (once <code>thumbnail_meta</code> is installed). Read-only.
+  </p>
+  <button class="btn btn-sm" onclick="runQualityCheck()" id="btnQuality">🔍 Find Bad Thumbnails</button>
+  <div id="qualityResult" style="margin-top:1rem"></div>
+</div>
+
 </main></div>
 <script>
 var BP='<?= bp() ?>',stopFlag=false,bRunning=false;
 function pad(n){return String(n).padStart(3,'0')}
 function toast(m){var t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';document.body.appendChild(t)}t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2600)}
 
+async function runQualityCheck(){
+  var btn=document.getElementById('btnQuality'), out=document.getElementById('qualityResult');
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span> Checking…';
+  out.innerHTML='';
+  try{
+    var r=await fetch(BP+'/admin/thumbnails.php?a=quality');
+    var d=await r.json();
+    if(!d.ok){ out.innerHTML='<div class="alert alert-err">'+d.error+'</div>'; return; }
+    var html='<div style="display:flex;gap:1.5rem;margin-bottom:.8rem;font-size:.8rem">'
+      +'<span>✓ OK: <strong style="color:#86efac">'+(d.by_status.ok||0)+'</strong></span>'
+      +'<span>✗ Broken: <strong style="color:#fca5a5">'+(d.by_status.broken||0)+'</strong></span>'
+      +'<span>— No thumbnail at all: <strong style="color:#fcd34d">'+d.no_thumbnail_at_all+'</strong></span>'
+      +'</div>';
+    if(d.bad.length){
+      html+='<div style="font-weight:700;font-size:.8rem;color:#fca5a5;margin-bottom:.4rem">Bad thumbnails ('+d.bad.length+')</div>'
+        +'<div class="sc-log" style="max-height:200px;overflow-y:auto;font-size:.74rem;margin-bottom:.8rem">'
+        +d.bad.map(function(b){return 'EP'+pad(b.episode)+' — '+b.status+': '+(b.reason||'');}).join('\n')+'</div>';
+    }
+    if(d.duplicates.length){
+      html+='<div style="font-weight:700;font-size:.8rem;color:#fcd34d;margin-bottom:.4rem">Duplicate images across episodes ('+d.duplicates.length+')</div>'
+        +'<div class="sc-log" style="max-height:160px;overflow-y:auto;font-size:.74rem">'
+        +d.duplicates.map(function(g){return 'EP'+g.episodes.split(',').join(', EP')+' share one image';}).join('\n')+'</div>';
+    }
+    if(!d.bad.length && !d.duplicates.length){
+      html+='<div class="alert alert-ok">✓ No bad or duplicate thumbnails found across '+d.checked+' checked.</div>';
+    }
+    out.innerHTML=html;
+  }catch(e){ out.innerHTML='<div class="alert alert-err">Request failed: '+e.message+'</div>'; }
+  btn.disabled=false; btn.innerHTML='🔍 Find Bad Thumbnails';
+}
 async function reverifyThumbs(){
   var btn=document.getElementById('btnReverify'), out=document.getElementById('reverifyResult');
   btn.disabled=true; btn.innerHTML='<span class="spin"></span> Scanning disk…';
