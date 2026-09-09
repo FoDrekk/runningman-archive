@@ -34,6 +34,25 @@ if (isset($_GET['a']) && $_GET['a'] === 'check') {
     exit;
 }
 
+// AJAX: data integrity check (PR #4, section 25) — read-only sweep for
+// duplicate/invalid episode numbers, invalid or duplicate air dates,
+// orphaned guests/thumbnails, duplicate thumbnail images and broken
+// theme/location references. Never merges, deletes or fixes anything.
+if (isset($_GET['a']) && $_GET['a'] === 'integrity') {
+    header('Content-Type: application/json');
+    if (ob_get_level() > 0) ob_clean();
+    try {
+        require_once __DIR__ . '/../includes/scraping/bootstrap.php';
+        $report = (new RmDuplicateDetector(getDB()))->fullCheck();
+        $total = 0;
+        foreach ($report as $r) $total += count($r['rows']);
+        echo json_encode(['ok' => true, 'total' => $total, 'categories' => $report]);
+    } catch (Throwable $e) {
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
 // A ?a= request that reached this point matched no handler above.
 // Rendering the page would hand a JSON caller an HTML document.
 rmJsonRejectUnknownAction();
@@ -119,6 +138,18 @@ $failures = getRecentFailures(7, 20);
   <?php endif; ?>
 </div>
 
+<!-- Data integrity check -->
+<div class="ap">
+  <div class="sh">Data Integrity Check</div>
+  <p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.9rem">
+    A read-only sweep for duplicate/invalid episode numbers, invalid or duplicate air dates, orphaned
+    guests and thumbnails, duplicate thumbnail images, and broken theme/location references.
+    Nothing is ever merged, deleted, or fixed automatically — every finding is a report for a person to act on.
+  </p>
+  <button class="btn btn-sm" onclick="runIntegrity()" id="btnIntegrity">🔍 Run Data Integrity Check</button>
+  <div id="integrityResult" style="margin-top:1rem"></div>
+</div>
+
 <!-- Recent failures -->
 <div class="ap">
   <div class="sh">Recent Failures (last 7 days)</div>
@@ -172,6 +203,29 @@ async function runCheck(){
     document.getElementById('healthResults').innerHTML = '<div style="color:#fca5a5">'+msg+'</div>';
   }
   btn.disabled=false; btn.innerHTML='🔄 Run Health Check Now';
+}
+async function runIntegrity(){
+  var btn=document.getElementById('btnIntegrity');
+  var out=document.getElementById('integrityResult');
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span> Scanning…';
+  out.innerHTML='';
+  try{
+    var r=await fetch(BP+'/admin/health.php?a=integrity');
+    var d=await r.json();
+    if(!d.ok){ out.innerHTML='<div class="alert alert-err">'+d.error+'</div>'; return; }
+    if(d.total===0){ out.innerHTML='<div class="alert alert-ok">✓ No integrity issues found.</div>'; return; }
+    var html='<div class="alert alert-warn" style="margin-bottom:.8rem">'+d.total+' issue(s) found — nothing was changed.</div>';
+    Object.keys(d.categories).forEach(function(k){
+      var c=d.categories[k];
+      if(!c.rows.length) return;
+      html+='<div style="margin-bottom:1rem"><div style="font-weight:700;font-size:.85rem;color:#fcd34d;margin-bottom:.4rem">'
+          + c.label+' ('+c.rows.length+')</div><div class="sc-log" style="max-height:220px;overflow-y:auto;font-size:.74rem">'
+          + c.rows.map(function(row){ return JSON.stringify(row); }).join('\n')
+          + '</div></div>';
+    });
+    out.innerHTML=html;
+  }catch(e){ out.innerHTML='<div class="alert alert-err">Request failed: '+e.message+'</div>'; }
+  btn.disabled=false; btn.innerHTML='🔍 Run Data Integrity Check';
 }
 window.addEventListener('load', runCheck);
 </script>

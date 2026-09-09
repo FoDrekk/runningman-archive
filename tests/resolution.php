@@ -332,6 +332,40 @@ if (!$up) {
     @rmdir(dirname($thumbFile));
 }
 
+// ============================================================
+section('data integrity check — a read-only sweep, PR #4');
+$dbForIntegrity = getDBSafe();
+$hasBaseSchema = false;
+if ($dbForIntegrity !== null) {
+    try { $dbForIntegrity->query('SELECT 1 FROM episodes LIMIT 1'); $hasBaseSchema = true; }
+    catch (Throwable $e) { $hasBaseSchema = false; }
+}
+if (!$hasBaseSchema) {
+    $skipped[] = 'data integrity check (needs the base schema — run with a database that has it installed)';
+} else {
+    $det = new RmDuplicateDetector($dbForIntegrity);
+    $iep = 999820;
+    $dbForIntegrity->exec("DELETE FROM episodes WHERE episode_number = $iep");
+    $dbForIntegrity->prepare(
+        "INSERT INTO episodes (episode_number, title, air_date, verification_required) VALUES (?,?,?,1)"
+    )->execute([$iep, 'Integrity Test Episode', '2099-01-01']);   // implausibly far in the future
+
+    $report = $det->fullCheck();
+    check('the report covers every documented category',
+          array_keys($report),
+          ['duplicate_episode_numbers','invalid_episode_numbers','invalid_dates','duplicate_air_dates',
+           'orphaned_guests','orphaned_thumbnails','duplicate_thumbnails','broken_references']);
+    check('an implausible future air date is caught',
+          (bool)array_filter($report['invalid_dates']['rows'], fn($r) => (int)$r['episode_number'] === $iep), true);
+    check('nothing was changed or deleted by running the check',
+          (int)$dbForIntegrity->query("SELECT COUNT(*) FROM episodes WHERE episode_number = $iep")->fetchColumn(), 1);
+
+    $dbForIntegrity->exec("DELETE FROM episodes WHERE episode_number = $iep");
+
+    check('a database with no problems reports none for invalid episode numbers',
+          $det->fullCheck()['invalid_episode_numbers']['rows'], []);
+}
+
 echo "\n" . str_repeat('─', 62) . "\n";
 foreach ($skipped as $s) echo "SKIPPED: $s\n";
 printf("%s — %d passed, %d failed\n", $fail === 0 ? 'RESOLUTION VERIFIED' : 'RESOLUTION PROBLEMS', $pass, $fail);
