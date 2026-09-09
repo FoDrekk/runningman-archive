@@ -152,8 +152,18 @@ function getArchiveStats(): array {
     ];
 }
 
-/** One representative (most recent, verified-thumbnail-preferred) episode for a theme/year/special-type tile. */
-function getRepresentativeThumb(array $where, array $params): ?string {
+/**
+ * One representative (most recent, verified-thumbnail-preferred) episode
+ * for a theme/year/special-type tile.
+ *
+ * $where is a raw SQL boolean fragment (e.g. "e.theme_id = ?"), not a
+ * key/value array — it's interpolated directly into the query and paired
+ * with $params bound positionally via PDO::execute(), the same pattern
+ * every other query in this file uses. Both call sites already pass a
+ * string, so the `array $where` type hint was simply wrong for the
+ * contract this function has always implemented.
+ */
+function getRepresentativeThumb(string $where, array $params): ?string {
     $db = getDB();
     $stmt = $db->prepare("
         SELECT th.local_path FROM episodes e
