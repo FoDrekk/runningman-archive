@@ -222,10 +222,13 @@ ALTER TABLE scrape_runs
     ADD COLUMN IF NOT EXISTS sources_warned INT NOT NULL DEFAULT 0 AFTER sources_empty;
 
 -- Seed the health table so every registered source has a row from day one.
+-- PR #4 source policy: MyDramaList/TMDB/Wikidata/AsianWiki were removed;
+-- TheTVDB and KShow123 replace them. IMDb stays (diagnostics/
+-- verification only). Installs upgrading from before PR #4 should also
+-- run database/pr4_source_cleanup.sql once.
 INSERT IGNORE INTO source_health (source_name, status) VALUES
     ('sbs','unknown'), ('wikipedia','unknown'), ('kowiki','unknown'),
-    ('myrunningman','unknown'), ('myrm','unknown'), ('mydramalist','unknown'),
-    ('tmdb','unknown'), ('wikidata','unknown'),
-    ('asianwiki','unknown'), ('imdb','unknown');
+    ('myrunningman','unknown'), ('myrm','unknown'),
+    ('tvdb','unknown'), ('kshow123','unknown'), ('imdb','unknown');
 
 SELECT 'Scraping engine tables created' AS status;

@@ -16,11 +16,9 @@ require_once __DIR__ . '/scrapers/AbstractScraper.php';
 require_once __DIR__ . '/scrapers/WikipediaScraper.php';
 require_once __DIR__ . '/scrapers/KoWikipediaScraper.php';
 require_once __DIR__ . '/scrapers/MyRunningManScraper.php';
-require_once __DIR__ . '/scrapers/MyDramaListScraper.php';
 require_once __DIR__ . '/scrapers/SbsScraper.php';
-require_once __DIR__ . '/scrapers/TmdbScraper.php';
-require_once __DIR__ . '/scrapers/WikidataScraper.php';
-require_once __DIR__ . '/scrapers/AsianWikiScraper.php';
+require_once __DIR__ . '/scrapers/TheTvdbScraper.php';
+require_once __DIR__ . '/scrapers/KShow123Scraper.php';
 require_once __DIR__ . '/scrapers/ImdbScraper.php';
 
 class RmSourceRegistry
@@ -36,10 +34,8 @@ class RmSourceRegistry
             new KoWikipediaScraper(),
             new MyRunningManScraper(),
             new MyRMtvScraper(),
-            new MyDramaListScraper(),
-            new TmdbScraper(),
-            new WikidataScraper(),
-            new AsianWikiScraper(),
+            new TheTvdbScraper(),
+            new KShow123Scraper(),
             new ImdbScraper(),
         ] as $s) {
             $this->scrapers[$s->name()] = $s;

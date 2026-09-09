@@ -40,16 +40,16 @@ section('source classification');
 $expectedClasses = [
     'sbs' => 'primary',
     'wikipedia' => 'secondary', 'kowiki' => 'secondary',
-    'myrunningman' => 'secondary', 'myrm' => 'secondary',
-    'mydramalist' => 'metadata', 'tmdb' => 'metadata',
-    'wikidata' => 'identity',
+    'myrunningman' => 'secondary', 'myrm' => 'secondary', 'tvdb' => 'secondary',
+    'kshow123' => 'metadata', 'imdb' => 'metadata',
 ];
 foreach ($expectedClasses as $src => $cls) {
     check("$src is classified $cls", rmScrapeSourceClass($src), $cls);
 }
 check('primary outranks secondary', rmScrapeSourceRank('sbs') > rmScrapeSourceRank('wikipedia'), true);
-check('secondary outranks metadata', rmScrapeSourceRank('wikipedia') > rmScrapeSourceRank('mydramalist'), true);
-check('identity carries no episode authority', rmScrapeSourceRank('wikidata'), 0);
+check('secondary outranks metadata', rmScrapeSourceRank('wikipedia') > rmScrapeSourceRank('kshow123'), true);
+check('identity carries no episode authority (class_rank concept, PR #4 has no live identity source)',
+      (int)rmScrapeConfig('class_rank.identity', -1), 0);
 check('every registered source has a class',
       array_values(array_filter(array_keys((array)rmScrapeConfig('sources', [])),
           fn($s) => !in_array(rmScrapeSourceClass($s), ['primary','secondary','metadata','identity'], true))), []);
@@ -62,10 +62,14 @@ $conflicts = [
         ['sbs' => ['air_date' => '2026-08-23'], 'wikipedia' => ['air_date' => '2026-08-30']],
         'sbs', '2026-08-23',
     ],
+    // PR #4 source policy: Wikipedia EN is canonical for episode
+    // metadata, so it leads title and synopsis (SBS keeps the lead only
+    // for air_date, where it is the broadcaster of record; myrunningman
+    // keeps the lead for location, the one field Wikipedia rarely has).
     'title' => [
         ['sbs' => ['title' => 'Episode #810 - Jeju Island Race'],
          'wikipedia' => ['title' => 'Episode #810 - Busan Coastal Run']],
-        'sbs', 'Episode #810 - Jeju Island Race',
+        'wikipedia', 'Episode #810 - Busan Coastal Run',
     ],
     'location' => [
         ['myrunningman' => ['location' => 'Jeju'], 'wikipedia' => ['location' => 'Busan']],
@@ -74,7 +78,7 @@ $conflicts = [
     'synopsis' => [
         ['myrunningman' => ['synopsis' => 'The members race across Jeju Island for two days against the production team.'],
          'wikipedia'    => ['synopsis' => 'The cast competes in a series of indoor games at a Seoul studio complex.']],
-        'myrunningman', null,
+        'wikipedia', null,
     ],
     'mission' => [
         ['wikipedia' => ['mission' => 'Name Tag Elimination'], 'myrunningman' => ['mission' => 'Hidden Identity Race']],
@@ -97,7 +101,7 @@ foreach ($conflicts as $field => [$payloads, $wantSource, $wantValue]) {
 section('thumbnail conflict');
 $r = $resolver->resolve([
     'myrunningman' => ['image_url' => 'https://www.myrunningman.com/thumbs/ep810.jpg'],
-    'tmdb'         => ['image_url' => 'https://image.tmdb.org/t/p/w1280/other.jpg'],
+    'kshow123'         => ['image_url' => 'https://kshow123.tv/img/other.jpg'],
 ], $ctx)['image_url'];
 check('thumbnail — myrunningman wins by field priority', $r['source'], 'myrunningman');
 check('thumbnail — the alternative is still recorded', count($r['conflicts']), 1);
@@ -112,10 +116,13 @@ check('no conflict recorded', $r['conflicts'], []);
 check('all three credited', count($r['sources']), 3);
 
 section('a weak source contradicting a strong one is noise, not a conflict');
+// kshow123 (tier 1, metadata) is the only remaining metadata-class source
+// in any field_priority list (PR #4 removed the rest) — and it only
+// covers title/image_url, so this scenario now lives on 'title'.
 $r = $resolver->resolve([
-    'wikipedia'   => ['synopsis' => 'The members race across Jeju Island for two days against the production team.'],
-    'mydramalist' => ['synopsis' => 'A completely different description of some other episode entirely here.'],
-], $ctx)['synopsis'];
+    'wikipedia' => ['title' => 'Episode #810 - Jeju Island Race'],
+    'kshow123'  => ['title' => 'Episode #810 - A Completely Different Title'],
+], $ctx)['title'];
 check('metadata vs secondary is not escalated to CONFLICT', $r['confidence'] === RmFieldResolver::CONFLICT, false);
 check('but the disagreement is still recorded', count($r['conflicts']) >= 1, true);
 
@@ -141,7 +148,7 @@ check('and the refusal is logged with a reason', !empty($rejected[0]['reason']),
 
 // A METADATA source must not overwrite a PRIMARY source's recorded value.
 $d = $differ->diff($existing,
-    ['air_date' => ['value' => '2026-09-06', 'source' => 'mydramalist', 'sources' => ['mydramalist'],
+    ['air_date' => ['value' => '2026-09-06', 'source' => 'kshow123', 'sources' => ['kshow123'],
                     'confidence' => RmFieldResolver::MEDIUM, 'conflicts' => []]],
     ['existing_sources' => ['air_date' => 'sbs']]);
 check('metadata cannot overwrite a primary-sourced air date', isset($d['apply']['air_date']), false);
@@ -159,13 +166,13 @@ check('a source may correct its own earlier value', isset($d['apply']['synopsis'
 $d = $differ->diff($existing,
     ['title' => ['value' => 'Episode #810 - Jeju Island Grand Race', 'source' => 'sbs', 'sources' => ['sbs'],
                  'confidence' => RmFieldResolver::MEDIUM, 'conflicts' => []]],
-    ['existing_sources' => ['title' => 'mydramalist']]);
+    ['existing_sources' => ['title' => 'kshow123']]);
 check('primary may overwrite a metadata-sourced title', isset($d['apply']['title']), true);
 
 // Gaps may still be filled by anyone.
 $d = $differ->diff(['title' => 'Episode #810 - Jeju Island Race'],
     ['synopsis' => ['value' => 'A brand new synopsis for a field that was previously empty entirely.',
-                    'source' => 'mydramalist', 'sources' => ['mydramalist'], 'confidence' => RmFieldResolver::LOW, 'conflicts' => []]],
+                    'source' => 'kshow123', 'sources' => ['kshow123'], 'confidence' => RmFieldResolver::LOW, 'conflicts' => []]],
     ['existing_sources' => ['title' => 'sbs']]);
 check('metadata may still FILL an empty field', isset($d['apply']['synopsis']), true);
 
@@ -178,7 +185,7 @@ check('all six spellings collapse to one identity', count($keys), 1);
 
 $merged = RmNormalizer::mergeGuests([
     'wikipedia'    => ['Lee Kwang-soo', 'Song Ji-hyo', 'Yoo Jae-suk'],
-    'mydramalist'  => ['Lee Kwang Soo', 'Song Ji Hyo', 'Ji Suk-jin'],
+    'kshow123'  => ['Lee Kwang Soo', 'Song Ji Hyo', 'Ji Suk-jin'],
     'myrunningman' => ['Lee Kwangsoo', 'Yoo Jae Suk'],
 ]);
 check('union across three sources yields four people', count($merged['names']), 4);
@@ -263,10 +270,10 @@ if (!$up) {
     $res = $te->acquire($ep, $year, [
         ['url' => "$B/?code=404",          'source' => 'myrunningman'],
         ['url' => "$B/?body=html_image",   'source' => 'sbs'],
-        ['url' => "$B/?body=real_image",   'source' => 'tmdb'],
+        ['url' => "$B/?body=real_image",   'source' => 'kshow123'],
     ], ['force' => true]);
     check('falls through two broken sources to a working one', $res['ok'], true);
-    check('  → credits the source that actually worked', $res['source'], 'tmdb');
+    check('  → credits the source that actually worked', $res['source'], 'kshow123');
     check('  → and reports what it tried', count($res['attempts']), 3);
 
     section('thumbnails — a bad image never displaces a good one');
@@ -323,6 +330,40 @@ if (!$up) {
     }
     @unlink($thumbFile);
     @rmdir(dirname($thumbFile));
+}
+
+// ============================================================
+section('data integrity check — a read-only sweep, PR #4');
+$dbForIntegrity = getDBSafe();
+$hasBaseSchema = false;
+if ($dbForIntegrity !== null) {
+    try { $dbForIntegrity->query('SELECT 1 FROM episodes LIMIT 1'); $hasBaseSchema = true; }
+    catch (Throwable $e) { $hasBaseSchema = false; }
+}
+if (!$hasBaseSchema) {
+    $skipped[] = 'data integrity check (needs the base schema — run with a database that has it installed)';
+} else {
+    $det = new RmDuplicateDetector($dbForIntegrity);
+    $iep = 999820;
+    $dbForIntegrity->exec("DELETE FROM episodes WHERE episode_number = $iep");
+    $dbForIntegrity->prepare(
+        "INSERT INTO episodes (episode_number, title, air_date, verification_required) VALUES (?,?,?,1)"
+    )->execute([$iep, 'Integrity Test Episode', '2099-01-01']);   // implausibly far in the future
+
+    $report = $det->fullCheck();
+    check('the report covers every documented category',
+          array_keys($report),
+          ['duplicate_episode_numbers','invalid_episode_numbers','invalid_dates','duplicate_air_dates',
+           'orphaned_guests','orphaned_thumbnails','duplicate_thumbnails','broken_references']);
+    check('an implausible future air date is caught',
+          (bool)array_filter($report['invalid_dates']['rows'], fn($r) => (int)$r['episode_number'] === $iep), true);
+    check('nothing was changed or deleted by running the check',
+          (int)$dbForIntegrity->query("SELECT COUNT(*) FROM episodes WHERE episode_number = $iep")->fetchColumn(), 1);
+
+    $dbForIntegrity->exec("DELETE FROM episodes WHERE episode_number = $iep");
+
+    check('a database with no problems reports none for invalid episode numbers',
+          $det->fullCheck()['invalid_episode_numbers']['rows'], []);
 }
 
 echo "\n" . str_repeat('─', 62) . "\n";

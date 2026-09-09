@@ -160,8 +160,12 @@ check('  → but a new source or improved parser makes it eligible again',
       $state->isEligible($ep), true);
 
 section('research state — the cool-down backs off, and never forever');
-$short = $state->coolDownSeconds(RmResearchState::NO_NEW, 1, $ep);
-$long  = $state->coolDownSeconds(RmResearchState::NO_NEW, 5, $ep);
+// An old, clearly-not-"recent" episode number, so the recent-episode
+// cap (tested separately below) cannot mask the doubling behaviour
+// this check is actually about.
+$oldEp = 1;
+$short = $state->coolDownSeconds(RmResearchState::NO_NEW, 1, $oldEp);
+$long  = $state->coolDownSeconds(RmResearchState::NO_NEW, 5, $oldEp);
 check('a repeated fruitless look waits longer each time', $long > $short, true);
 check('  → but never past the ceiling',
       $state->coolDownSeconds(RmResearchState::NO_NEW, 99, $ep)
@@ -191,7 +195,6 @@ check('  → and counted as ONE independent witness', (int)$copied['independent'
 $ev2 = new RmEvidenceSet();
 $ev2->add('wikipedia', 'air_date', '2026-08-30');
 $ev2->add('kowiki',    'air_date', '2026-08-30');
-$ev2->add('wikidata',  'air_date', '2026-08-30');
 $ev2->group();
 check('sister projects of one publisher are one witness too',
       (int)$ev2->candidates('air_date')[0]['independent'], 1);
@@ -227,10 +230,10 @@ check('SBS outranks a community site overall',
       $rep->reliability('sbs', '*') > $rep->reliability('myrm', '*'), true);
 check('SBS is stronger on air dates than on synopses',
       $rep->reliability('sbs', 'air_date') > $rep->reliability('sbs', 'synopsis'), true);
-check('Wikidata is strong on guest identity',
-      $rep->reliability('wikidata', 'guests') >= 85, true);
+check('Wikipedia is strong on guest identity (PR #4: canonical for episode metadata)',
+      $rep->reliability('wikipedia', 'guests') >= 85, true);
 check('a source not listed for a field has little standing on it',
-      $rep->reliability('wikidata', 'synopsis') < $rep->reliability('myrunningman', 'synopsis'), true);
+      $rep->reliability('kshow123', 'synopsis') < $rep->reliability('myrunningman', 'synopsis'), true);
 check('every band has a word for it', RmSourceReputation::band(95), 'VERY HIGH');
 check('  → and so does the bottom',    RmSourceReputation::band(10), 'VERY LOW');
 
@@ -249,7 +252,7 @@ check('  → and it can say why',        count($d1->why) > 2, true);
 check('  → naming the sources',        in_array('sbs', $d1->supporting, true), true);
 
 $d2 = $dec->decide($ep, 'location', [[
-    'value' => 'Seoul', 'hash' => 'x', 'sources' => ['mydramalist'], 'groups' => ['solo:mydramalist'],
+    'value' => 'Seoul', 'hash' => 'x', 'sources' => ['kshow123'], 'groups' => ['solo:kshow123'],
     'independent' => 1, 'reliability' => 60, 'evidence' => [],
 ]], 'Seoul', 95);
 check('a value the archive already holds is KEPT', $d2->decision, 'KEEP');
@@ -279,6 +282,27 @@ check('  → nothing is written on a coin flip', $d5->isSafe(), false);
 
 $d6 = $dec->decide($ep, 'synopsis', [], null, 0);
 check('no evidence at all is UNKNOWN, not a guess', $d6->decision, 'UNKNOWN');
+
+section('decisions — a verification-only source (PR #4) never writes canonical metadata alone');
+$verifyOnly = $dec->decide($ep, 'title', [[
+    'value' => 'Jeju Race', 'hash' => 'v', 'sources' => ['imdb'], 'groups' => ['solo:imdb'],
+    'independent' => 1, 'reliability' => 90, 'evidence' => [], 'verification_only' => true,
+]], null, 0);
+check('IMDb alone cannot FILL an empty field, however confident', $verifyOnly->decision, 'REVIEW');
+check('  → and is never treated as safe to write unattended', $verifyOnly->isSafe(), false);
+
+$verifyVsExisting = $dec->decide($ep, 'title', [[
+    'value' => 'A Different Title', 'hash' => 'w', 'sources' => ['imdb'], 'groups' => ['solo:imdb'],
+    'independent' => 1, 'reliability' => 95, 'evidence' => [], 'verification_only' => true,
+]], 'Jeju Race', 85);
+check('IMDb alone cannot UPDATE an existing canonical value either', $verifyVsExisting->decision, 'REVIEW');
+
+$verifyPlusReal = $dec->decide($ep, 'title', [[
+    'value' => 'Jeju Race', 'hash' => 'x', 'sources' => ['sbs', 'imdb'],
+    'groups' => ['solo:sbs', 'solo:imdb'], 'independent' => 2, 'reliability' => 92, 'evidence' => [],
+    'verification_only' => false,
+]], null, 0);
+check('IMDb corroborating a real source still FILLs normally', $verifyPlusReal->decision, 'FILL');
 
 section('decisions — a critical field needs more than a tag does');
 check('air_date is critical',  RmDecisionEngine::criticality('air_date'), 'critical');
@@ -545,11 +569,12 @@ $cache->set("http:wiki:year:$year:" . md5("List of Running Man episodes ($year)"
         '<table class="wikitable"><tr><th>Ep.</th><th>Airdate</th><th>Title</th><th>Guest(s)</th><th>Mission</th></tr>'
         . "<tr><td>$blockEp</td><td>2026-07-12</td><td>Still Works Without MDL</td><td>Fixture Person</td><td>A mission</td></tr></table>"
         . str_repeat('<!-- pad -->', 220)]]]), 900, 'api');
-// MyDramaList refuses; everything else is simply unreachable offline.
+// TheTVDB has no key in this test environment; everything else is
+// simply unreachable offline.
 $r = $svc->researchEpisode($blockEp, ['all_fields' => true, 'skip_thumbnail' => true]);
 check('the episode still completes on the sources that did answer', $r['outcome'], 'completed');
 check('  → and the refusal is reported as its own thing, not a crash',
-      in_array($r['sources']['mydramalist']['status'] ?? '',
+      in_array($r['sources']['tvdb']['status'] ?? '',
                ['ACCESS_RESTRICTED','TEMPORARY_ERROR','RATE_LIMITED','NOT_APPLICABLE'], true), true);
 
 // ============================================================
@@ -580,9 +605,9 @@ check('maximum turns discovery on',  $modes['maximum']['discovery'], true);
 check('deep re-checks weak fields',  $modes['deep']['recheck_weak'], true);
 check('balanced is the default',     (string)rmScrapeConfig('research.default_mode'), 'balanced');
 
-section('the two new sources are registered and cover real fields');
+section('PR #4 source cleanup — TheTVDB and KShow123 are registered and cover real fields');
 $reg = RmSourceRegistry::instance();
-foreach (['asianwiki' => ['guests','synopsis','title_ko'], 'imdb' => ['air_date','title']] as $name => $mustCover) {
+foreach (['tvdb' => ['air_date','title'], 'kshow123' => ['title','image_url']] as $name => $mustCover) {
     check("$name is registered", $reg->has($name), true);
     $a = $reg->get($name);
     check("  → and supplies fields", count($a->fields()) > 0, true);
@@ -593,6 +618,21 @@ foreach (['asianwiki' => ['guests','synopsis','title_ko'], 'imdb' => ['air_date'
 }
 check('adding them changed the source signature the cool-down keys on',
       strlen(RmResearchState::signature()), 40);
+
+section('PR #4 source cleanup — removed adapters are gone, IMDb is diagnostics-only');
+foreach (['mydramalist', 'tmdb', 'wikidata', 'asianwiki'] as $removed) {
+    check("$removed is no longer a registered source", $reg->has($removed), false);
+    check("$removed has no field priority entries left", (function () use ($removed) {
+        foreach ((array)rmScrapeConfig('field_priority', []) as $order) if (in_array($removed, $order, true)) return false;
+        return true;
+    })(), true);
+}
+check('imdb is still registered (diagnostics/verification only)', $reg->has('imdb'), true);
+check('imdb is marked verification_only', rmScrapeSourceVerificationOnly('imdb'), true);
+check('imdb has no field-priority entries (cannot win a canonical field)', (function () {
+    foreach ((array)rmScrapeConfig('field_priority', []) as $order) if (in_array('imdb', $order, true)) return false;
+    return true;
+})(), true);
 
 echo "\n" . str_repeat('─', 62) . "\n";
 printf("%s — %d passed, %d failed\n", $fail === 0 ? 'RESEARCH VERIFIED' : 'RESEARCH PROBLEMS', $pass, $fail);

@@ -25,6 +25,9 @@ require_once __DIR__ . '/Decision.php';
 require_once __DIR__ . '/SourceReputation.php';
 require_once __DIR__ . '/Discovery.php';
 require_once __DIR__ . '/Anomaly.php';
+require_once __DIR__ . '/FieldLock.php';
+require_once __DIR__ . '/AiReasoning.php';
+require_once __DIR__ . '/AiSynopsis.php';
 
 class RmResearchService
 {
@@ -35,6 +38,7 @@ class RmResearchService
     private RmSourceReputation $rep;
     private RmDiscovery       $discovery;
     private RmProvenance      $prov;
+    private RmAiSynopsisService $aiSynopsis;
 
     public function __construct(?PDO $db = null, ?RmScrapingEngine $engine = null)
     {
@@ -45,7 +49,18 @@ class RmResearchService
         $this->rep       = RmSourceReputation::instance();
         $this->discovery = new RmDiscovery($this->db);
         $this->prov      = new RmProvenance($this->db);
+        $this->aiSynopsis = new RmAiSynopsisService($this->db);
+
+        // AI reasoning is consulted only for decisions the deterministic
+        // rules already classified REVIEW (see RmDecisionEngine::refine).
+        // With no key configured, RmAiDecisionProvider::decide() always
+        // returns null and the deterministic result stands unchanged.
+        $aiClient = new RmAiClient();
+        if ($aiClient->available()) $this->decider->setProvider(new RmAiDecisionProvider($aiClient));
     }
+
+    /** Swap in a test double — used by tests to exercise GENERATE/REVIEW without a live API key. */
+    public function setAiSynopsisService(RmAiSynopsisService $svc): void { $this->aiSynopsis = $svc; }
 
     public function state(): RmResearchState { return $this->state; }
     public function engine(): RmScrapingEngine { return $this->engine; }
@@ -168,15 +183,26 @@ class RmResearchService
         $existingConf = $this->existingConfidence($epNum);
         $decisions = [];
         foreach ($evidence->fields() as $field) {
+            $existingVal = $existing[$this->existingKeyFor($field)] ?? null;
+            // A locked field (or a locked whole episode) never reaches the
+            // normal thresholds at all — manually verified data is
+            // protected absolutely, not just weighted heavily.
+            if (RmFieldLock::isLocked($this->db, $epNum, $field)) {
+                $decisions[$field] = new RmDecision(
+                    episode: $epNum, field: $field, decision: 'KEEP', value: $existingVal, existing: $existingVal,
+                    confidence: (int)($existingConf[$field] ?? 100),
+                    reason: 'This field is locked — research never overwrites a manually protected value.',
+                    why: ['Field is locked against automatic changes'],
+                );
+                $note("$field: locked — left untouched");
+                continue;
+            }
             $d = $this->decider->decide(
                 $epNum, $field, $evidence->candidates($field),
-                $existing[$this->existingKeyFor($field)] ?? null,
-                (int)($existingConf[$field] ?? 0)
+                $existingVal, (int)($existingConf[$field] ?? 0)
             );
             $decisions[$field] = $this->decider->refine(
-                $d, $this->decider->contextFor($epNum, $field, $evidence,
-                                               $existing[$this->existingKeyFor($field)] ?? null,
-                                               (int)($existingConf[$field] ?? 0))
+                $d, $this->decider->contextFor($epNum, $field, $evidence, $existingVal, (int)($existingConf[$field] ?? 0))
             );
             $this->learn($field, $evidence, $decisions[$field]);
         }
@@ -198,6 +224,49 @@ class RmResearchService
             'skip_thumbnail' => !empty($opt['skip_thumbnail']),
         ];
         $plan = $this->engine->plan($epNum, $planOpt);
+
+        // ── AI SYNOPSIS (section 9) ──
+        // Only ever consulted when synopsis was actually wanted this run,
+        // no source already supplied a usable one, and the field isn't
+        // locked. KEEP_EXISTING / INSUFFICIENT_EVIDENCE / DISABLED /
+        // RETRY_LATER all leave the plan exactly as the sources built it.
+        $aiResult = null;
+        if (in_array('synopsis', $wanted, true) && empty($plan['apply']['synopsis'])
+            && !RmFieldLock::isLocked($this->db, $epNum, 'synopsis')) {
+            $facts = array_filter([
+                'title'         => $existing['title'] ?? null,
+                'guests'        => $existing['guests'] ?? [],
+                'mission'       => $existing['mission'] ?? null,
+                'location'      => $existing['location'] ?? null,
+                'special_notes' => $existing['special_notes'] ?? null,
+            ], fn($v) => $v !== null && $v !== '' && $v !== []);
+            $aiResult = $this->aiSynopsis->consider($epNum, $existing['synopsis'] ?? null, $facts,
+                ['run_id' => $run?->id()]);
+            $note('AI synopsis: ' . $aiResult['decision'] . ' — ' . mb_strimwidth($aiResult['reason'], 0, 90, '…'),
+                  in_array($aiResult['decision'], ['REJECT', 'RETRY_LATER'], true) ? 'warning' : 'info');
+
+            if ($aiResult['decision'] === 'GENERATE' && !empty($aiResult['value'])) {
+                $plan['apply']['synopsis'] = $aiResult['value'];
+                $plan['resolved']['synopsis'] = [
+                    'value' => $aiResult['value'], 'source' => 'ai_generated',
+                    'confidence' => $aiResult['confidence'] >= 90 ? 'high' : 'medium', 'conflicts' => [],
+                ];
+                $decisions['synopsis'] = new RmDecision(
+                    episode: $epNum, field: 'synopsis', decision: 'FILL', value: $aiResult['value'],
+                    existing: $existing['synopsis'] ?? null, confidence: $aiResult['confidence'],
+                    reason: $aiResult['reason'],
+                    why: ['AI-generated from: ' . implode(', ', $aiResult['evidence_basis']),
+                          'Grounding: ' . ($aiResult['grounding_status'] ?? 'passed')],
+                );
+            } elseif (in_array($aiResult['decision'], ['REQUEST_REVIEW', 'REJECT'], true) && !empty($aiResult['value'])) {
+                $decisions['synopsis'] = new RmDecision(
+                    episode: $epNum, field: 'synopsis', decision: 'REVIEW', value: $aiResult['value'],
+                    existing: $existing['synopsis'] ?? null, confidence: $aiResult['confidence'],
+                    reason: $aiResult['reason'],
+                    why: ['AI draft awaiting review: ' . implode(', ', $aiResult['evidence_basis'])],
+                );
+            }
+        }
 
         // ── SAFELY WRITE ──
         // Only fields whose decision cleared its own threshold, AND which

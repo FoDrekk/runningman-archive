@@ -6,8 +6,9 @@
 // independent components:
 //
 //   scraping/scrapers/*.php   one adapter per source (SBS, Wikipedia
-//                             EN + KO, myrunningman, myrm.tv,
-//                             MyDramaList, TMDB, Wikidata)
+//                             EN + KO, myrunningman, myrm.tv, TheTVDB,
+//                             KShow123, IMDb — diagnostics/verification
+//                             only, see config/scraping.php)
 //   scraping/ScrapingEngine   collect → resolve → diff → apply
 //   scraping/FieldResolver    per-FIELD source priority + confidence
 //   scraping/DataNormalizer   guest/location/date/title normalisation
@@ -41,10 +42,6 @@ function rmLastFetchError(): ?string {
     return $GLOBALS['__rm_last_fetch_error'] ?? RmHttpClient::instance()->lastError();
 }
 
-function rmLastMdlError(): ?string {
-    return $GLOBALS['__rm_last_mdl_error'] ?? null;
-}
-
 // ── rmFetch — now backed by RmHttpClient ──────────────────────
 // Same signature and same "null on failure" contract as before, but
 // with classified errors, transient-only retries, per-host rate
@@ -53,18 +50,6 @@ function rmFetch(string $url, int $timeout = 15, int $retries = 2): ?string {
     $res = RmHttpClient::instance()->get($url, ['timeout' => $timeout, 'retries' => $retries]);
     $GLOBALS['__rm_last_fetch_error'] = $res->ok ? null : $res->error;
     return $res->ok ? $res->body : null;
-}
-
-// ── MyDramaList feature flag (kept for admin/diagnostics.php) ──
-// The source is no longer hard-disabled by a constant: the engine
-// contacts it, and when the host answers with a bare 403 the health
-// monitor marks it BLOCKED and suppresses further attempts for an
-// hour. That way a network which CAN reach MDL gets its data, and a
-// network which cannot pays one request per hour instead of one per
-// episode. This constant now only reports whether the source is
-// enabled in config/scraping.php.
-if (!defined('RM_ENABLE_MYDRAMALIST')) {
-    define('RM_ENABLE_MYDRAMALIST', rmScrapeSourceEnabled('mydramalist'));
 }
 
 // ── Per-source accessors (used by the diagnostics trace pages) ──
@@ -99,18 +84,6 @@ function rmMyRunningManExtra(int $epNum): array {
         'synopsis'  => $d['synopsis']  ?? null,
         '_status'   => $d['_status']   ?? null,
         '_error'    => $d['_error']    ?? null,
-    ];
-}
-
-function rmMyDramaListEpisode(int $epNum): array {
-    $d = RmSourceRegistry::instance()->get('mydramalist')->episode($epNum);
-    $GLOBALS['__rm_last_mdl_error'] = $d['_error'] ?? null;
-    return [
-        'synopsis' => $d['synopsis'] ?? null,
-        'location' => $d['location'] ?? null,
-        'guests'   => $d['guests']   ?? [],
-        '_status'  => $d['_status']  ?? null,
-        '_error'   => $d['_error']   ?? null,
     ];
 }
 

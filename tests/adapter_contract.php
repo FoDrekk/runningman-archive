@@ -157,7 +157,7 @@ function seedFor(string $source, int $ep, string $body, RmCache $cache): void {
     $keys = match ($source) {
         'myrunningman' => ["http:mrm:ep:$ep"],
         'myrm'         => ["http:myrm:ep:$ep"],
-        'mydramalist'  => ["http:mdl:ep:$ep"],
+        'kshow123'     => ["http:kshow123:ep:$ep"],
         'wikipedia'    => ['http:wiki:year:' . $year . ':' . md5("List of Running Man episodes ($year)")],
         'kowiki'       => ['http:kowiki:page:' . $year . ':' . md5("런닝맨의 에피소드 목록 ($year)")],
         default        => [],
@@ -176,7 +176,7 @@ $bodies = [
     'binary noise'                 => "\x00\x01\x02\xff\xfe garbage \x00 bytes",
 ];
 
-$htmlAdapters = ['myrunningman' => new MyRunningManScraper(), 'myrm' => new MyRMtvScraper(), 'mydramalist' => new MyDramaListScraper()];
+$htmlAdapters = ['myrunningman' => new MyRunningManScraper(), 'myrm' => new MyRMtvScraper()];
 $testEp = 810;
 
 foreach ($htmlAdapters as $name => $adapter) {
@@ -238,16 +238,26 @@ check('good page yields image',      !empty($good['image_url']), true);
 check('good page yields air date',   $good['air_date'] ?? null, '2026-08-23');
 check('good page carries no error',  $good['_error'] ?? null, null);
 
-section('B4. keyed and non-episode sources declare themselves honestly');
-$tmdb = (new TmdbScraper())->episode($testEp);
-check('TMDB without a key reports disabled', $tmdb['_status'] ?? null, 'disabled');
-check('TMDB without a key yields no fields',
-      array_values(array_filter(array_keys($tmdb), fn($k) => !str_starts_with($k, '_'))), []);
-check('TMDB explains why',                    str_contains((string)($tmdb['_error'] ?? ''), 'API key'), true);
+section('B4. keyed sources and the diagnostics-only source declare themselves honestly');
+$tvdb = (new TheTvdbScraper())->episode($testEp);
+check('TheTVDB without a key reports disabled', $tvdb['_status'] ?? null, 'disabled');
+check('TheTVDB without a key yields no fields',
+      array_values(array_filter(array_keys($tvdb), fn($k) => !str_starts_with($k, '_'))), []);
+check('TheTVDB explains why',                 str_contains((string)($tvdb['_error'] ?? ''), 'API key'), true);
 
-$wd = (new WikidataScraper())->episode($testEp);
-check('Wikidata declares itself not-applicable for episodes', $wd['_status'] ?? null, 'not_applicable');
-check('Wikidata contributes no episode fields', (new WikidataScraper())->fields(), []);
+// PR #4 source policy: IMDb may run and contribute evidence, but is
+// flagged verification-only so RmDecisionEngine can never let it alone
+// FILL or UPDATE canonical episode metadata (see tests/research.php for
+// the decision-level proof of that guarantee).
+check('IMDb is registered', RmSourceRegistry::instance()->has('imdb'), true);
+check('IMDb is flagged verification-only', rmScrapeSourceVerificationOnly('imdb'), true);
+check('IMDb is absent from every field_priority list (cannot be the chosen canonical source)',
+      (function () {
+          foreach ((array)rmScrapeConfig('field_priority', []) as $order) {
+              if (in_array('imdb', $order, true)) return false;
+          }
+          return true;
+      })(), true);
 
 section('B4b. adapters must not raise PHP diagnostics');
 // The bug this catches: SbsScraper carried a pattern with two bounded
@@ -275,8 +285,6 @@ $realistic = [
     'myrm' => '<html><head><meta property="og:title" content="Episode #813 - Jeju Race">'
         . '<meta property="og:description" content="The members race across Jeju Island for two days.">'
         . '</head><body><div>Broadcast Date: 2026-08-23</div><div>Guests: Lee Kwang-soo, Jeon So-min</div></body></html>',
-    'mydramalist' => '<html><head><meta property="og:description" content="A specific episode description written by an editor for this episode.">'
-        . '</head><body>Landmark: Jeju Island<br>Guests: Lee Kwang-soo</body></html>',
 ];
 foreach ($realistic as $src => $page) {
     $cache->flush();
@@ -285,6 +293,20 @@ foreach ($realistic as $src => $page) {
     RmSourceRegistry::instance()->get($src)->episode(813, ['latest' => 813]);
     check("$src raises no PHP diagnostics on a realistic page", array_slice($raised, $before), []);
 }
+
+// KShow123 is a two-hop fetch (search → episode page), so its cache is
+// seeded at both hops rather than through seedFor().
+$cache->flush();
+$cache->set('kshow123:url:813', 'https://kshow123.tv/running-man-episode-813-jeju-race.html', 1800, 'index');
+seedFor('kshow123', 813,
+    '<html><head><meta property="og:title" content="Running Man Episode #813 - Jeju Race">'
+  . '<meta property="og:image" content="https://x.test/ep813.jpg"></head><body></body></html>' . str_repeat(' ', 900),
+    $cache);
+$before = count($raised);
+$ks = (new KShow123Scraper())->episode(813, ['latest' => 813]);
+check('kshow123 raises no PHP diagnostics on a realistic page', array_slice($raised, $before), []);
+check('kshow123 finds the episode page via search and parses it', $ks['_status'] ?? null, 'ok');
+check('  → and yields a thumbnail', !empty($ks['image_url']), true);
 
 // SBS: both a server-rendered listing and a client-rendered shell.
 $sbsPages = [

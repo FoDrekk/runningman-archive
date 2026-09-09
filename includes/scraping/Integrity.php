@@ -151,6 +151,101 @@ class RmDuplicateDetector
         } catch (Throwable $e) { }
         return $found;
     }
+
+    /**
+     * The full data-integrity sweep (PR #4, section 25). Read-only —
+     * everything found is a report, never an automatic fix. Each
+     * category degrades to an empty result if its table is absent,
+     * so this runs the same whether or not the optional PR #4/PR #1
+     * migrations have been installed.
+     *
+     * @return array<string,array{label:string,rows:array}>
+     */
+    public function fullCheck(int $limit = 500): array
+    {
+        $out = [
+            'duplicate_episode_numbers' => ['label' => 'Duplicate episode numbers', 'rows' => []],
+            'invalid_episode_numbers'   => ['label' => 'Invalid episode numbers',    'rows' => []],
+            'invalid_dates'             => ['label' => 'Invalid air dates',          'rows' => []],
+            'duplicate_air_dates'       => ['label' => 'Duplicate air dates',        'rows' => []],
+            'orphaned_guests'           => ['label' => 'Orphaned guests',            'rows' => []],
+            'orphaned_thumbnails'       => ['label' => 'Orphaned thumbnails',        'rows' => []],
+            'duplicate_thumbnails'      => ['label' => 'Duplicate thumbnail images', 'rows' => []],
+            'broken_references'         => ['label' => 'Broken theme/location references', 'rows' => []],
+        ];
+        if ($this->db === null) return $out;
+        $db = $this->db;
+
+        $q = function (string $sql) use ($db): array {
+            try { return $db->query($sql)->fetchAll(PDO::FETCH_ASSOC); } catch (Throwable $e) { return []; }
+        };
+
+        // A structural impossibility if the UNIQUE constraint holds, but
+        // worth checking anyway — an import that ran with foreign key /
+        // unique checks disabled can leave the schema no longer matching
+        // what the application assumes.
+        $out['duplicate_episode_numbers']['rows'] = $q(
+            "SELECT episode_number, COUNT(*) c FROM episodes GROUP BY episode_number HAVING c > 1 LIMIT $limit");
+
+        // The ceiling is deliberately generous — test fixtures across this
+        // project use large placeholder numbers (999xxx) specifically to
+        // stay clear of real episodes, and those must never read as a
+        // data problem in a real archive.
+        $out['invalid_episode_numbers']['rows'] = $q(
+            "SELECT episode_id, episode_number FROM episodes WHERE episode_number <= 0 OR episode_number > 100000 LIMIT $limit");
+
+        $out['invalid_dates']['rows'] = $q(
+            "SELECT episode_number, air_date FROM episodes
+              WHERE air_date IS NOT NULL
+                AND (air_date < '2010-06-01' OR air_date > DATE_ADD(CURDATE(), INTERVAL 21 DAY))
+              ORDER BY episode_number LIMIT $limit");
+
+        $out['duplicate_air_dates']['rows'] = $q(
+            "SELECT air_date, GROUP_CONCAT(episode_number ORDER BY episode_number) episodes, COUNT(*) c
+               FROM episodes WHERE air_date IS NOT NULL
+              GROUP BY air_date HAVING c > 1 ORDER BY air_date DESC LIMIT $limit");
+
+        $out['orphaned_guests']['rows'] = $q(
+            "SELECT g.guest_id, g.name_romanized FROM guests g
+               LEFT JOIN episode_guests eg ON eg.guest_id = g.guest_id
+              WHERE eg.guest_id IS NULL LIMIT $limit");
+
+        // A thumbnails row that no episode actually points to — usually
+        // left behind by a re-download that created a fresh row instead
+        // of updating the one the episode still references.
+        $out['orphaned_thumbnails']['rows'] = $q(
+            "SELECT t.thumbnail_id, t.episode_number, t.local_path FROM thumbnails t
+               LEFT JOIN episodes e ON e.thumbnail_id = t.thumbnail_id
+              WHERE e.episode_id IS NULL LIMIT $limit");
+
+        if ($this->tableExists('thumbnail_meta')) {
+            $out['duplicate_thumbnails']['rows'] = $q(
+                "SELECT content_hash, GROUP_CONCAT(episode_number ORDER BY episode_number) episodes, COUNT(*) c
+                   FROM thumbnail_meta WHERE content_hash IS NOT NULL AND content_hash <> ''
+                  GROUP BY content_hash HAVING c > 1 LIMIT $limit");
+        }
+
+        // The schema's own foreign keys make this normally impossible;
+        // it only fires when a bulk import ran with FOREIGN_KEY_CHECKS=0
+        // (several files under database/import_csv/ and MASTER_FIX.sql do).
+        $out['broken_references']['rows'] = $q(
+            "SELECT e.episode_number, 'theme_id' AS ref, e.theme_id AS value FROM episodes e
+               LEFT JOIN themes t ON t.theme_id = e.theme_id
+              WHERE e.theme_id IS NOT NULL AND t.theme_id IS NULL
+              UNION ALL
+             SELECT e.episode_number, 'location_id' AS ref, e.location_id AS value FROM episodes e
+               LEFT JOIN locations l ON l.location_id = e.location_id
+              WHERE e.location_id IS NOT NULL AND l.location_id IS NULL
+              LIMIT $limit");
+
+        return $out;
+    }
+
+    private function tableExists(string $table): bool
+    {
+        try { $this->db->query("SELECT 1 FROM `$table` LIMIT 1"); return true; }
+        catch (Throwable $e) { return false; }
+    }
 }
 
 // ============================================================

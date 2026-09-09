@@ -269,6 +269,89 @@ class RmHttpClient
         return [$data, $res];
     }
 
+    /**
+     * POST a JSON body, decode a JSON response. Used only by adapters that
+     * need a token-exchange call (e.g. TheTVDB's login endpoint) — everyday
+     * scraping stays GET-only. Shares offline mode, robots and negative
+     * caching with get(); a single attempt, since a login call is cheap to
+     * repeat and retrying credentials is not something to do silently.
+     *
+     * @param array $opt timeout, headers[], cache_ttl, cache_key
+     */
+    public function postJson(string $url, array $body, array $opt = []): array {
+        $r = new RmHttpResponse();
+        $r->url = $url;
+
+        $ttl = (int)($opt['cache_ttl'] ?? 0);
+        $cacheKey = 'http:post:' . ($opt['cache_key'] ?? $url);
+        if ($ttl > 0 && empty($opt['bypass_cache'])) {
+            $hit = $this->cache->get($cacheKey);
+            if (is_array($hit)) return [$hit, (function () use ($r, $url) {
+                $r->ok = true; $r->status = 200; $r->fromCache = true; $r->url = $url; return $r;
+            })()];
+        }
+
+        if (!function_exists('curl_init')) {
+            $r->errorClass = self::CLASS_NO_CURL;
+            $r->error = 'PHP curl extension not available';
+            return [null, $r];
+        }
+        if (rmScrapeConfig('http.offline', false) && !self::isLoopback($url)) {
+            $r->errorClass = self::CLASS_OFFLINE;
+            $r->error = 'Outbound requests are disabled (RM_SCRAPE_OFFLINE) — no live source was contacted';
+            return [null, $r];
+        }
+
+        $timeout = (int)($opt['timeout'] ?? rmScrapeConfig('http.timeout', 15));
+        $headers = array_merge([
+            'Accept: application/json', 'Content-Type: application/json',
+        ], $opt['headers'] ?? []);
+
+        $started = microtime(true);
+        $this->throttle($url, (int)($opt['delay_ms'] ?? rmScrapeConfig('http.default_delay_ms', 900)));
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $url,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => json_encode($body, JSON_UNESCAPED_UNICODE),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 2,
+            CURLOPT_TIMEOUT        => $timeout,
+            CURLOPT_CONNECTTIMEOUT => (int)rmScrapeConfig('http.connect_timeout', 8),
+            CURLOPT_USERAGENT      => (string)rmScrapeConfig('http.user_agent', RM_SCRAPER_UA),
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+        ]);
+        $raw    = curl_exec($ch);
+        $info   = curl_getinfo($ch);
+        $errno  = curl_errno($ch);
+        $errMsg = curl_error($ch);
+        curl_close($ch);
+        $r->ms = (int)round((microtime(true) - $started) * 1000);
+
+        if ($errno !== 0) {
+            [$r->errorClass, $r->error] = $this->classifyCurl($errno, $errMsg);
+            return [null, $r];
+        }
+        $status = (int)($info['http_code'] ?? 0);
+        $r->status = $status;
+        if ($status < 200 || $status >= 300) {
+            [$r->errorClass, $r->error] = $this->classifyHttp($status);
+            return [null, $r];
+        }
+        $data = json_decode((string)$raw, true);
+        if (!is_array($data)) {
+            $r->errorClass = self::CLASS_EMPTY;
+            $r->error = 'Response was not valid JSON';
+            return [null, $r];
+        }
+        $r->ok = true;
+        if ($ttl > 0) $this->cache->set($cacheKey, $data, $ttl, 'api');
+        return [$data, $r];
+    }
+
     /** Loopback hosts stay reachable in offline mode so fixtures work. */
     public static function isLoopback(string $url): bool
     {

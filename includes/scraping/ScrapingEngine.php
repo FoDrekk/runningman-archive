@@ -257,7 +257,7 @@ class RmScrapingEngine
             if (isset($meta[$name]) || !$a->fields()) continue;
 
             if (!$a->isEnabled()) {
-                $reason = in_array($name, ['tmdb','tvdb'], true)
+                $reason = in_array($name, ['tvdb'], true)
                     ? 'No API key configured — optional source, skipped at no cost'
                     : 'Disabled in config/scraping.php';
                 $meta[$name] = ['status'=>'disabled','url'=>null,'error'=>$reason,

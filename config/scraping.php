@@ -112,48 +112,29 @@ function rmScrapeDefaultConfig(): array {
                 'delay_ms'=> 1000,
                 'base'    => 'https://myrm.tv/',
             ],
-            'mydramalist' => [
-                'label'   => 'MyDramaList',
-                'tier'    => 1,
-                'class'   => 'metadata',
-                // Historically a flat HTTP 403 from this host (TLS/IP
-                // reputation blocking, not headers). Left enabled so the
-                // engine can prove that for itself and mark the source
-                // BLOCKED in health rather than pretending it works —
-                // the blocked-suppression window means it costs one
-                // request per hour, not one per episode.
-                'enabled' => true,
-                'delay_ms'=> 2500,
-                'base'    => 'https://mydramalist.com/',
-            ],
-            'tmdb' => [
-                'label'    => 'TMDB',
-                'tier'     => 2,
-                'class'   => 'metadata',
-                'enabled'  => true,      // still needs a key — see api_keys
-                'delay_ms' => 300,
-                'base'     => 'https://api.themoviedb.org/3/',
-                'tv_id'    => 33238,     // "Running Man" (SBS, 2010) on TMDB
-            ],
-            'wikidata' => [
-                'label'   => 'Wikidata',
-                'tier'    => 2,
-                'class'   => 'identity',
-                'enabled' => true,
-                'delay_ms'=> 500,
-                'base'    => 'https://www.wikidata.org/',
-            ],
-            'asianwiki' => [
-                'label'   => 'AsianWiki',
+            'tvdb' => [
+                'label'   => 'TheTVDB',
                 'tier'    => 2,
                 'class'   => 'secondary',
-                // Server-rendered MediaWiki with per-episode pages and
-                // strong guest coverage — it earns its place by supplying
-                // fields the existing set covers weakly, not by adding to
-                // the source count.
+                // Independent episode/date verification. Needs a key —
+                // see api_keys — and stays disabled and skipped without
+                // one, exactly like every other keyed source here.
                 'enabled' => true,
-                'delay_ms'=> 1200,
-                'base'    => 'https://asianwiki.com/',
+                'delay_ms'=> 500,
+                'base'    => 'https://api4.thetvdb.com/v4/',
+                'series'  => 79086,      // "Running Man" on TheTVDB
+            ],
+            'kshow123' => [
+                'label'   => 'KShow123',
+                'tier'    => 1,
+                'class'   => 'metadata',
+                // Secondary episode/availability verification and a
+                // thumbnail fallback. Community-run mirror, so it earns
+                // only a FILL role — see field_priority — never a source
+                // that overwrites a stronger class.
+                'enabled' => true,
+                'delay_ms'=> 1500,
+                'base'    => 'https://kshow123.tv/',
             ],
             'imdb' => [
                 'label'   => 'IMDb',
@@ -167,6 +148,12 @@ function rmScrapeDefaultConfig(): array {
                 'delay_ms'=> 2000,
                 'base'    => 'https://www.imdb.com/',
                 'series'  => 'tt1587289',      // Running Man (SBS, 2010)
+                // Diagnostics/cross-check only (PR #4 source policy): IMDb
+                // may corroborate or contest another source's value, but a
+                // candidate whose ONLY support is a verification_only
+                // source is never picked by RmDecisionEngine to FILL or
+                // UPDATE canonical episode metadata. See Decision.php.
+                'verification_only' => true,
             ],
         ],
 
@@ -178,27 +165,39 @@ function rmScrapeDefaultConfig(): array {
         'source_lineage' => [
             'wikipedia' => 'wikimedia',
             'kowiki'    => 'wikimedia',
-            'wikidata'  => 'wikimedia',
         ],
 
         // ── FIELD-LEVEL source priority ───────────────────────────
         // First source in a list that supplies a VALID value wins the
         // field. This is deliberately per-field: the site with the best
         // air dates is not the site with the best synopses.
+        //
+        // Wikipedia EN is canonical for episode metadata (PR #4 source
+        // policy) — it leads every field it can supply. SBS stays ahead
+        // of it only where SBS is definitionally authoritative (it IS
+        // the broadcast record). Secondary sources fill what Wikipedia
+        // doesn't have; they do not silently replace it — see
+        // RmDecisionEngine's class-rank and overwrite-margin guards.
+        // `imdb` is intentionally absent from every list here: it is
+        // diagnostics/verification only (see sources.imdb.verification_only)
+        // and must never win a field.
         'field_priority' => [
-            'title'        => ['sbs','wikipedia','myrm','asianwiki','imdb','mydramalist','tmdb','kowiki','myrunningman'],
-            'title_ko'     => ['sbs','kowiki','asianwiki','wikidata'],
-            'air_date'     => ['sbs','wikipedia','kowiki','imdb','tmdb','mydramalist','myrm','myrunningman'],
-            'synopsis'     => ['myrunningman','myrm','asianwiki','mydramalist','imdb','wikipedia','tmdb','sbs','kowiki'],
-            'guests'       => ['wikipedia','kowiki','asianwiki','mydramalist','sbs','myrm','myrunningman'],
-            'mission'      => ['wikipedia','myrunningman','asianwiki','kowiki'],
+            'title'        => ['wikipedia','sbs','myrm','tvdb','kowiki','myrunningman','kshow123'],
+            'title_ko'     => ['sbs','kowiki'],
+            'air_date'     => ['sbs','wikipedia','tvdb','kowiki','myrm','myrunningman'],
+            'synopsis'     => ['wikipedia','myrunningman','myrm','sbs','kowiki'],
+            'guests'       => ['wikipedia','kowiki','sbs','myrm','myrunningman'],
+            'mission'      => ['wikipedia','myrunningman','kowiki'],
             'teams'        => ['wikipedia'],
             'results'      => ['wikipedia'],
-            'location'     => ['myrunningman','wikipedia','mydramalist','sbs','kowiki'],
+            'location'     => ['myrunningman','wikipedia','sbs','kowiki'],
             'theme'        => ['myrunningman','wikipedia'],
-            'tags'         => ['myrunningman','wikipedia','asianwiki'],
+            'tags'         => ['myrunningman','wikipedia'],
             'special_notes'=> ['wikipedia','sbs','myrunningman'],
-            'image_url'    => ['myrunningman','tmdb','sbs','myrm','imdb','wikipedia'],
+            // Thumbnail priority mirrors the Thumbnail Service spec
+            // exactly: SBS → MyRunningMan/MyRM → KShow123 → Wikipedia →
+            // (generated fallback, handled outside this list).
+            'image_url'    => ['sbs','myrunningman','myrm','kshow123','wikipedia'],
         ],
 
         // Fields merged as sets (union + dedup) instead of "one winner".
@@ -239,9 +238,9 @@ function rmScrapeDefaultConfig(): array {
         // differs sharply from its standing overall. Anything not named
         // here is derived from tier, class and field-priority rank.
         'field_reputation' => [
-            'air_date' => ['sbs' => 95, 'wikipedia' => 88, 'imdb' => 70],
+            'air_date' => ['sbs' => 95, 'wikipedia' => 88, 'tvdb' => 80],
             'title_ko' => ['sbs' => 92, 'kowiki' => 88],
-            'guests'   => ['wikidata' => 92, 'wikipedia' => 85, 'kowiki' => 82],
+            'guests'   => ['wikipedia' => 90, 'kowiki' => 82],
             'synopsis' => ['sbs' => 55, 'myrunningman' => 80],
         ],
 
@@ -316,8 +315,47 @@ function rmScrapeDefaultConfig(): array {
 
         // ── Optional API keys — env or config/scraping.local.php ──
         'api_keys' => [
-            'tmdb' => null,
             'tvdb' => null,
+        ],
+
+        // ── AI reasoning / synopsis generation (PR #4) ────────────
+        // The AI layer is a REASONING service, not a chatbot: it is only
+        // ever consulted for cases the deterministic rules leave open
+        // (RmDecisionEngine's REVIEW outcome) or to draft a synopsis when
+        // evidence exists but no source has written one. It never runs
+        // against a complete, trusted record.
+        //
+        // mode: auto     — apply GENERATE/USE_SOURCE_DATA decisions that
+        //                   clear the confidence threshold automatically
+        //       review   — every AI decision lands in Needs Review instead
+        //                   of being applied automatically (the default —
+        //                   safest for a fresh install)
+        //       disabled — the provider is never consulted at all
+        //
+        // No key configured (RM_AI_API_KEY / ANTHROPIC_API_KEY) behaves
+        // exactly like every other optional source: the feature reports
+        // itself unavailable and the rest of the engine works unaffected.
+        'ai' => [
+            'mode'       => 'review',
+            'provider'   => 'anthropic',
+            'model'      => 'claude-sonnet-5',
+            'api_base'   => 'https://api.anthropic.com/v1/messages',
+            'timeout'    => 30,
+            'max_tokens' => 400,
+            'thresholds' => [
+                'high'   => 90,   // >= high        → HIGH CONFIDENCE, may auto-apply in 'auto' mode
+                'review' => 70,   // [review, high)  → REVIEW
+                                  // <  review       → REJECT / INSUFFICIENT_EVIDENCE
+            ],
+            'synopsis' => [
+                'min_words'          => 50,
+                'max_words'          => 100,
+                'min_evidence_fields'=> 2,   // need at least this many usable facts to attempt one
+                'banned_openers'     => [
+                    'in this episode', 'in this exciting episode', 'in today\'s episode',
+                    'this episode features', 'join the running man members as',
+                ],
+            ],
         ],
 
         // ── Thumbnails ────────────────────────────────────────────
@@ -346,10 +384,13 @@ function rmScrapeConfig(?string $path = null, $default = null) {
             if (is_array($local)) $cfg = rmScrapeMergeConfig($cfg, $local);
         }
 
-        foreach (['tmdb' => 'RM_TMDB_API_KEY', 'tvdb' => 'RM_TVDB_API_KEY'] as $k => $env) {
+        foreach (['tvdb' => 'RM_TVDB_API_KEY'] as $k => $env) {
             $v = getenv($env);
             if ($v !== false && trim($v) !== '') $cfg['api_keys'][$k] = trim($v);
         }
+
+        $aiKey = getenv('RM_AI_API_KEY') ?: getenv('ANTHROPIC_API_KEY');
+        if ($aiKey !== false && trim((string)$aiKey) !== '') $cfg['ai']['api_key'] = trim($aiKey);
 
         $offline = getenv('RM_SCRAPE_OFFLINE');
         if ($offline !== false && $offline !== '' && $offline !== '0') $cfg['http']['offline'] = true;
@@ -387,9 +428,18 @@ function rmScrapeSourceRank(?string $name): int {
 // A source is usable only if enabled AND (if it needs one) keyed.
 function rmScrapeSourceEnabled(string $name): bool {
     if (!rmScrapeConfig("sources.$name.enabled", false)) return false;
-    if (in_array($name, ['tmdb','tvdb'], true)) {
+    if (in_array($name, ['tvdb'], true)) {
         $key = rmScrapeConfig("api_keys.$name");
         return is_string($key) && trim($key) !== '';
     }
     return true;
+}
+
+/**
+ * Diagnostics/verification-only source (PR #4 source policy): may
+ * corroborate or contest a value but must never be the sole support for
+ * a FILL or UPDATE of canonical episode metadata. See Decision.php.
+ */
+function rmScrapeSourceVerificationOnly(string $name): bool {
+    return (bool)rmScrapeConfig("sources.$name.verification_only", false);
 }

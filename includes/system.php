@@ -196,7 +196,7 @@ function runHealthCheck(): array {
         checkSourceHealth('Wikipedia API',     'https://en.wikipedia.org/w/api.php?action=query&format=json'),
         checkSourceHealth('myrm.tv',           'https://myrm.tv/'),
         checkSourceHealth('myrunningman.com',  'https://www.myrunningman.com/'),
-        checkSourceHealth('MyDramaList',       'https://mydramalist.com/25565-running-man'),
+        checkSourceHealth('KShow123',          'https://kshow123.tv/'),
     ];
     $start = microtime(true);
     try { getDB()->query('SELECT 1'); $dbOk = true; $dbErr = null; }

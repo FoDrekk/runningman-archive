@@ -253,6 +253,12 @@ class RmEvidenceSet
         $out = [];
         foreach ($byHash as $c) {
             $c['independent'] = count($c['groups']);
+            // PR #4 source policy: a candidate whose ONLY witnesses are
+            // diagnostics/verification-only sources (e.g. IMDb) must never
+            // be treated as the winner for canonical metadata — see
+            // RmDecisionEngine::decide(). It still appears in the list so
+            // it can corroborate or contest the real winner.
+            $c['verification_only'] = self::allVerificationOnly($c['sources']);
             // Corroborated strength. One witness is worth exactly what
             // that witness is worth — no more, and crucially no less.
             // Each further INDEPENDENT witness closes part of the
@@ -271,8 +277,18 @@ class RmEvidenceSet
             $c['groups'] = array_keys($c['groups']);
             $out[] = $c;
         }
-        usort($out, fn($a, $b) => [$b['independent'], $b['reliability']] <=> [$a['independent'], $a['reliability']]);
+        usort($out, fn($a, $b) =>
+            [$a['verification_only'] ? 1 : 0, $b['independent'], $b['reliability']]
+            <=> [$b['verification_only'] ? 1 : 0, $a['independent'], $a['reliability']]);
         return $out;
+    }
+
+    /** True only when every source behind this candidate is verification-only (e.g. IMDb). */
+    private static function allVerificationOnly(array $sources): bool
+    {
+        if (!$sources) return false;
+        foreach ($sources as $s) if (!rmScrapeSourceVerificationOnly((string)$s)) return false;
+        return true;
     }
 
     /** Persist this evidence so the archive can answer "who said what" later. */

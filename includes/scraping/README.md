@@ -93,6 +93,25 @@ A source only earns its place if it supplies information the others
 don't, or independently corroborates them. More sources is not better
 data.
 
+## Sources (PR #4 policy)
+
+Eight sources, each with an explicit role. Wikipedia EN is canonical
+for episode metadata; nothing silently falls back to a weaker source to
+replace it, and nothing outside this list gets contacted at all —
+MyDramaList, TMDB, Wikidata, AsianWiki and every other unreliable/unused
+adapter discovered during the PR #4 audit were removed, not disabled.
+
+| Source | Role | Class |
+|---|---|---|
+| Wikipedia (EN) | **Canonical** episode metadata | secondary |
+| SBS (Official) | Broadcast verification, air dates, official thumbnails | primary |
+| Wikipedia (KO) | Korean-language cross-check | secondary |
+| myrunningman.com | Archive enrichment — guests, tags, location, thumbnails | secondary |
+| myrm.tv | Archive enrichment — synopsis, guests, thumbnails | secondary |
+| TheTVDB | Independent episode/date verification | secondary |
+| KShow123 | Secondary availability check, thumbnail fallback | metadata |
+| IMDb | **Diagnostics/verification only** — see below | metadata |
+
 ## Source classes
 
 Separate from field priority (which source *wins* a field), each source
@@ -102,13 +121,55 @@ is classified by what it *is* — and that decides what it may
 | Class | Sources | May overwrite |
 |---|---|---|
 | `primary` | SBS | anything |
-| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv | secondary, metadata |
-| `metadata` | MyDramaList, TMDB | only its own earlier values |
-| `identity` | Wikidata | nothing — not an episode source |
+| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv, TheTVDB | secondary, metadata |
+| `metadata` | KShow123, IMDb | only its own earlier values |
+| `identity` | *(none currently registered)* | nothing — not an episode source |
 
 A metadata source may still *fill* an empty field. What it may not do is
 replace a value the broadcaster supplied, on a day when the broadcaster
 happens to be unreachable.
+
+**IMDb is diagnostics/verification only.** It is fetched and its values
+are compared against every other source, but it carries
+`verification_only => true` in `config/scraping.php` and is absent from
+every `field_priority` list. `RmEvidenceSet::candidates()` marks any
+candidate whose *only* witnesses are verification-only sources, and
+`RmDecisionEngine::decide()` refuses to FILL or UPDATE canonical
+metadata from one — it can corroborate the real winner or raise a
+conflict for review, never become the value written.
+
+## AI reasoning (PR #4)
+
+AI is a reasoning service, not a chatbot, and it is optional exactly
+like a keyed source: no `RM_AI_API_KEY`/`ANTHROPIC_API_KEY` means the
+layer reports itself unavailable and every caller falls back to its
+own safe default. It is consulted in exactly two places:
+
+- **`RmAiDecisionProvider`** (`AiReasoning.php`) plugs into
+  `RmDecisionEngine`'s existing provider seam and is asked ONLY about
+  decisions the deterministic rules already classified `REVIEW` — a
+  genuine conflict between well-supported sources. It may only choose
+  among the candidate values it was shown; it can never write a value
+  no source actually offered.
+- **`RmAiSynopsisService`** (`AiSynopsis.php`) drafts a synopsis when
+  one is missing and the archive already holds enough verified facts
+  (title, guests, mission, location, special notes) to write from.
+  A usable existing synopsis is never rewritten. Every draft is checked
+  by **`RmGroundingValidator`** (`GroundingValidator.php`) against that
+  same evidence — an invented guest, location or outcome fails
+  grounding, triggers one revision attempt, and is rejected outright if
+  still unsupported. Confidence thresholds (`config/scraping.php` →
+  `ai.thresholds`) then decide the outcome: high-confidence in `auto`
+  mode is `GENERATE`, `review` mode (the default) always holds a
+  grounded draft for a person, and anything below the review threshold
+  is `INSUFFICIENT_EVIDENCE`. Every decision — including a refusal — is
+  written to `ai_generation_log` when `database/pr4_ai_diagnostics.sql`
+  is installed, so "why does EP809 have an AI-generated synopsis?" and
+  "how many drafts were rejected this month?" both have an answer.
+
+`RmFieldLock` (`FieldLock.php`, same migration) protects manually
+verified data absolutely: a locked field is forced to `KEEP` before
+either the deterministic engine or the AI layer ever sees a threshold.
 
 ## Tests
 
@@ -116,14 +177,19 @@ happens to be unreachable.
 php includes/scraping/selftest.php   # normalisation, validation, resolution
 php tests/adapter_contract.php       # every adapter × every malformed response
 php tests/resolution.php             # conflicts, guests, thumbnails
+php tests/ai.php                     # AI grounding, synopsis decisions, thresholds
 php tests/migration.php --fresh      # the migration is additive and idempotent
 php tests/integration.php            # write path, modes, dry run, cron recovery
+php tests/research.php               # run state, evidence, decisions, research memory
 ```
 
-All five are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the
-HTTP client refuse every non-loopback request, so no test can reach a
-live source. Fixtures are served from a local server in
-`tests/fixtures/`. The last two need MySQL/MariaDB and skip cleanly
+All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP
+client refuse every non-loopback request, so no test can reach a live
+source — including `api.anthropic.com`, for `tests/ai.php`, which uses
+a fake, injectable AI client (`RmAiClient`'s own seam) for every
+GENERATE/REJECT/REQUEST_REVIEW path. Fixtures are served from a local
+server in `tests/fixtures/`. `migration.php`, `integration.php`,
+`research.php` and part of `ai.php` need MySQL/MariaDB and skip cleanly
 without one. CI runs all of them (`.github/workflows/php.yml`).
 
 Set `RM_SCRAPE_OFFLINE=1` yourself whenever you want to be certain a
@@ -145,7 +211,9 @@ command cannot touch a real site.
 
 ## Database
 
-`database/scraping_engine.sql` is additive: it creates new tables and
-alters nothing existing. Every feature that uses them degrades to a
-no-op when they are absent, so the site works either way. Install it
-from the control centre or run it in phpMyAdmin.
+`database/scraping_engine.sql`, `database/research_engine.sql` and
+`database/pr4_source_cleanup.sql` are all additive: they create new
+tables/columns and alter nothing existing. Every feature that uses them
+degrades to a no-op when they are absent, so the site works either way.
+Install them from the control centre or run them in phpMyAdmin, in that
+order.
