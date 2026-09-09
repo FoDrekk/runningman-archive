@@ -153,6 +153,11 @@ class RmDecisionEngine
         $top  = $candidates[0];
         $rest = array_slice($candidates, 1);
         $conf = $this->score($top, $rest);
+        // PR #4 source policy: a candidate backed ONLY by a diagnostics/
+        // verification-only source (e.g. IMDb) can corroborate or contest
+        // another value, but must never itself become the value written
+        // for canonical episode metadata — see RmEvidenceSet::candidates().
+        $topVerificationOnly = (bool)($top['verification_only'] ?? false);
 
         $supporting = array_values(array_unique($top['sources']));
         $dissenting = [];
@@ -163,6 +168,13 @@ class RmDecisionEngine
 
         // ── Nothing there: filling a gap is the safest thing we do ──
         if (!$hasExisting) {
+            if ($topVerificationOnly) {
+                return new RmDecision($epNum, $field, 'REVIEW', $top['value'], $existing, $conf,
+                    'The only evidence for this empty field comes from a diagnostics/verification-only source '
+                    . '(' . implode(', ', $supporting) . ') — it may corroborate a canonical source but cannot fill the field alone.',
+                    $supporting, $dissenting, (int)$top['independent'],
+                    array_merge($why, ['Verification-only source cannot fill canonical metadata unattended']));
+            }
             $decision = $conf >= $th['fill'] ? 'FILL' : ($conf >= $th['review'] ? 'REVIEW' : 'REJECT');
             $reason = match ($decision) {
                 'FILL'   => "The field was empty and the evidence is strong enough ($conf% ≥ {$th['fill']}%) to fill it.",
@@ -195,6 +207,13 @@ class RmDecisionEngine
         // exists. It is overwritten when the new evidence is clearly
         // better than the evidence the old value rests on.
         $margin = (int)rmScrapeConfig('research.overwrite_margin', 8);
+        if ($topVerificationOnly) {
+            return new RmDecision($epNum, $field, 'REVIEW', $top['value'], $existing, $conf,
+                'A diagnostics/verification-only source (' . implode(', ', $supporting) . ') disagrees with the '
+                . 'stored value — flagged for a person to weigh, since a verification-only source cannot overwrite canonical data.',
+                $supporting, $dissenting, (int)$top['independent'],
+                array_merge($why, ['Verification-only source cannot overwrite existing data unattended']));
+        }
         if ($conf >= $th['update'] && $conf >= $existingConf + $margin) {
             return new RmDecision($epNum, $field, 'UPDATE', $top['value'], $existing, $conf,
                 "The evidence for the new value ($conf%) is stronger than the evidence behind the stored one"

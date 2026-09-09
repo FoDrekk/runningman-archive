@@ -197,7 +197,7 @@ class RmSourceHealth
                 'class'           => rmScrapeSourceClass($name),
                 'rank'            => rmScrapeSourceRank($name),
                 'enabled'         => $enabled,
-                'needs_key'       => in_array($name, ['tmdb','tvdb'], true),
+                'needs_key'       => in_array($name, ['tvdb'], true),
                 'status'          => $enabled ? (string)($h['status'] ?? self::UNKNOWN) : 'disabled',
                 'last_class'      => $h['last_status_class'] ?? null,
                 'last_error'      => $h['last_error'] ?? null,
@@ -251,7 +251,7 @@ class RmSourceHealth
             if (!rmScrapeSourceEnabled($name)) {
                 $out[$name] = ['name'=>$name,'label'=>$cfg['label'] ?? $name,'ok'=>null,
                                'status'=>'disabled','ms'=>0,
-                               'error'=> in_array($name,['tmdb','tvdb'],true) ? 'No API key configured (optional source)' : 'Disabled in config'];
+                               'error'=> in_array($name, ['tvdb'], true) ? 'No API key configured (optional source)' : 'Disabled in config'];
                 continue;
             }
             $url = (string)($cfg['base'] ?? '');

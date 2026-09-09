@@ -212,10 +212,14 @@ if ($action === 'integrity') {
     }
 }
 
-// ── AJAX: enrich guest records from Wikidata ──────────────────
+// ── AJAX: enrich guest records via the registered person-lookup source ──
 // Fills BLANK name_korean / profession / nationality only. An editor's
 // existing value is never overwritten by a lookup, and a name without a
-// confident Wikidata match is left alone rather than guessed at.
+// confident match is left alone rather than guessed at. PR #4 removed
+// Wikidata (the only adapter that ever implemented person lookup), so
+// this currently reports every row "skipped" until a future source
+// implements RmScraper::supportsPersonLookup() — degrading to a safe
+// no-op rather than failing, exactly like every other optional feature.
 if ($action === 'enrich_guests') {
     set_time_limit(180);
     try {
@@ -724,7 +728,7 @@ function integrityScan(btn){
 
 function enrichGuests(btn){
   busy(btn,true);
-  out('<div class="sc-meta">Looking up guest identities on Wikidata… <span class="spin"></span></div>');
+  out('<div class="sc-meta">Looking up guest identities… <span class="spin"></span></div>');
   fetch('scraper.php?a=enrich_guests&limit=25').then(function(r){ return r.json(); }).then(function(d){
     busy(btn,false);
     if (!d.ok) { out('<div class="alert alert-err">' + esc(d.error) + '</div>'); return; }

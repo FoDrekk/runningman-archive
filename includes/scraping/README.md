@@ -93,6 +93,25 @@ A source only earns its place if it supplies information the others
 don't, or independently corroborates them. More sources is not better
 data.
 
+## Sources (PR #4 policy)
+
+Eight sources, each with an explicit role. Wikipedia EN is canonical
+for episode metadata; nothing silently falls back to a weaker source to
+replace it, and nothing outside this list gets contacted at all —
+MyDramaList, TMDB, Wikidata, AsianWiki and every other unreliable/unused
+adapter discovered during the PR #4 audit were removed, not disabled.
+
+| Source | Role | Class |
+|---|---|---|
+| Wikipedia (EN) | **Canonical** episode metadata | secondary |
+| SBS (Official) | Broadcast verification, air dates, official thumbnails | primary |
+| Wikipedia (KO) | Korean-language cross-check | secondary |
+| myrunningman.com | Archive enrichment — guests, tags, location, thumbnails | secondary |
+| myrm.tv | Archive enrichment — synopsis, guests, thumbnails | secondary |
+| TheTVDB | Independent episode/date verification | secondary |
+| KShow123 | Secondary availability check, thumbnail fallback | metadata |
+| IMDb | **Diagnostics/verification only** — see below | metadata |
+
 ## Source classes
 
 Separate from field priority (which source *wins* a field), each source
@@ -102,13 +121,22 @@ is classified by what it *is* — and that decides what it may
 | Class | Sources | May overwrite |
 |---|---|---|
 | `primary` | SBS | anything |
-| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv | secondary, metadata |
-| `metadata` | MyDramaList, TMDB | only its own earlier values |
-| `identity` | Wikidata | nothing — not an episode source |
+| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv, TheTVDB | secondary, metadata |
+| `metadata` | KShow123, IMDb | only its own earlier values |
+| `identity` | *(none currently registered)* | nothing — not an episode source |
 
 A metadata source may still *fill* an empty field. What it may not do is
 replace a value the broadcaster supplied, on a day when the broadcaster
 happens to be unreachable.
+
+**IMDb is diagnostics/verification only.** It is fetched and its values
+are compared against every other source, but it carries
+`verification_only => true` in `config/scraping.php` and is absent from
+every `field_priority` list. `RmEvidenceSet::candidates()` marks any
+candidate whose *only* witnesses are verification-only sources, and
+`RmDecisionEngine::decide()` refuses to FILL or UPDATE canonical
+metadata from one — it can corroborate the real winner or raise a
+conflict for review, never become the value written.
 
 ## Tests
 
@@ -145,7 +173,9 @@ command cannot touch a real site.
 
 ## Database
 
-`database/scraping_engine.sql` is additive: it creates new tables and
-alters nothing existing. Every feature that uses them degrades to a
-no-op when they are absent, so the site works either way. Install it
-from the control centre or run it in phpMyAdmin.
+`database/scraping_engine.sql`, `database/research_engine.sql` and
+`database/pr4_source_cleanup.sql` are all additive: they create new
+tables/columns and alter nothing existing. Every feature that uses them
+degrades to a no-op when they are absent, so the site works either way.
+Install them from the control centre or run them in phpMyAdmin, in that
+order.

@@ -57,9 +57,9 @@ function urlsFor(string $source, int $ep): array {
                               'prop'=>'text','format'=>'json','disablelimitreport'=>1,'disableeditsection'=>1])],
         'myrunningman' => ["https://www.myrunningman.com/ep/$ep"],
         'myrm'         => ["https://myrm.tv/ep/$ep"],
-        'mydramalist'  => ["https://mydramalist.com/25565-running-man/episode/$ep"],
-        'wikidata'     => ['https://www.wikidata.org/wiki/Q485576'],
-        'tmdb'         => ['https://api.themoviedb.org/3/tv/' . (int)rmScrapeConfig('sources.tmdb.tv_id', 33238)],
+        'tvdb'         => ['https://api4.thetvdb.com/v4/series/' . (int)rmScrapeConfig('sources.tvdb.series', 0) . '/episodes/default'],
+        'kshow123'     => ['https://kshow123.tv/search.html?keyword=' . urlencode("running man episode $ep")],
+        'imdb'         => ['https://www.imdb.com/title/' . rmScrapeConfig('sources.imdb.series', 'tt1587289') . '/episodes/'],
         default        => [],
     };
 }
@@ -93,10 +93,13 @@ function selectorsFor(string $source, int $ep): array {
             'table'   => 'table.wikitable, column-aligned with rowspan/colspan carry-over',
             'columns' => 'header labels: Ep./회, Airdate/방송일, Title/제목, Guest(s)/게스트, Mission, Teams, Results',
         ],
-        'mydramalist' => [
-            'synopsis' => 'og:description, else div class~=(episode-synopsis|show-synopsis|description)',
-            'location' => '"Landmark:"/"Site:"/"Location:" label',
-            'guests'   => '"Guests:" label',
+        'tvdb' => [
+            'episode match' => 'name field, digits + optional 회, mapped to the absolute episode number',
+            'fields'        => 'name (title), aired (air_date), image (image_url)',
+        ],
+        'kshow123' => [
+            'existence' => 'search.html result linking to .../running-man...episode-{n}...',
+            'thumbnail' => 'og:image on the matched episode page',
         ],
         default => [],
     };

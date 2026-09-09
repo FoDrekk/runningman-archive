@@ -194,9 +194,16 @@ CREATE TABLE IF NOT EXISTS research_discovery (
 -- Seed reputation rows for every registered source so the table is
 -- never empty on a fresh install. Real scores replace these as soon as
 -- the first run produces evidence.
+--
+-- PR #4 source policy: MyDramaList, TMDB, Wikidata and AsianWiki were
+-- removed as unreliable/unused; TheTVDB and KShow123 replace them.
+-- IMDb stays, but only as a diagnostics/verification-only source (see
+-- config/scraping.php `sources.imdb.verification_only`) — installs
+-- that already ran the old seed list should also run
+-- database/pr4_source_cleanup.sql once to retire the stale rows.
 INSERT IGNORE INTO source_reputation (source_name, field_name, reputation) VALUES
     ('sbs','*',75), ('wikipedia','*',75), ('kowiki','*',70),
-    ('myrunningman','*',70), ('myrm','*',60), ('mydramalist','*',55),
-    ('tmdb','*',60), ('wikidata','*',65), ('asianwiki','*',60), ('imdb','*',60);
+    ('myrunningman','*',70), ('myrm','*',60),
+    ('tvdb','*',65), ('kshow123','*',55), ('imdb','*',60);
 
 SELECT 'Research engine tables created' AS status;

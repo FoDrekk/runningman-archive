@@ -197,7 +197,7 @@ function rmScrapingSelfTest(): array
     $reg = RmSourceRegistry::instance();
     $check('registry', 'every configured source has an adapter',
            count(array_diff(array_keys((array)rmScrapeConfig('sources', [])), array_keys($reg->all()))), 0);
-    $check('registry', 'keyless TMDB is not usable', $reg->usable('tmdb', true) === (rmScrapeConfig('api_keys.tmdb') !== null), true);
+    $check('registry', 'keyless TheTVDB is not usable', $reg->usable('tvdb', true) === (rmScrapeConfig('api_keys.tvdb') !== null), true);
     $check('registry', 'field targeting narrows the source list',
            count($reg->sourcesForFields(['teams'])) < count($reg->active(true)), true);
     foreach ((array)rmScrapeConfig('field_priority', []) as $field => $order) {

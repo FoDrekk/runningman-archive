@@ -120,6 +120,12 @@ abstract class RmScraper
         return $this->http()->getJson($url, $opt);
     }
 
+    protected function postJson(string $url, array $body, array $opt = []): array
+    {
+        $opt['delay_ms'] = $opt['delay_ms'] ?? $this->delayMs();
+        return $this->http()->postJson($url, $body, $opt);
+    }
+
     /**
      * Try several selectors in turn. Sources redesign their markup; a
      * single hard-coded selector is a scheduled outage. Returns the

@@ -54,7 +54,7 @@ class RmDiscovery
             $out[$source] = array_slice($urls, 0, $max);
         }
 
-        foreach ($sources ?: ['asianwiki', 'myrunningman', 'myrm'] as $source) {
+        foreach ($sources ?: ['myrunningman', 'myrm', 'kshow123'] as $source) {
             $found = array_merge(
                 $out[$source] ?? [],
                 $this->fromSitemap($source, $epNum),
