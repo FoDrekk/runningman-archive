@@ -142,10 +142,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save'
             }
         }
 
+        // ── Provenance: a manual edit through this form is exactly what
+        // MANUALLY_VERIFIED means (section 29/7) — record it for every
+        // field the editor actually supplied, so the archive can tell
+        // "an editor typed this" from "a source supplied this" later,
+        // and so it displays correctly in Data Provenance below. Fields
+        // left blank are not claimed as verified — an empty field is
+        // absence of data, not a human confirming an empty value.
+        $prov = new RmProvenance($db);
+        foreach ([
+            'title' => $title, 'air_date' => $airDateVal, 'synopsis' => $synopsis,
+            'mission' => $mission, 'special_notes' => $notes, 'location' => $locName,
+        ] as $field => $value) {
+            if ($value === null || $value === '') continue;
+            $prov->recordField($epNum, $field, ['source' => 'manual_verified', 'confidence' => 'high', 'value' => $value]);
+        }
+
         echo json_encode(['ok' => true, 'ep' => $epNum]);
     } catch (Exception $e) {
         echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
+    exit;
+}
+
+// ── Field lock / unlock (section 7/29) ──────────────────────
+// A locked field is skipped entirely by research and the AI layer
+// (RmFieldLock::isLocked(), consulted in RmResearchService) — an
+// editor's explicit protection against a future automated overwrite.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['action'] ?? '', ['lock_field', 'unlock_field'], true)) {
+    header('Content-Type: application/json');
+    $epNum = (int)($_POST['episode_number'] ?? 0);
+    $field = trim((string)($_POST['field'] ?? ''));
+    if ($epNum < 1 || $field === '') { echo json_encode(['ok' => false, 'error' => 'Missing episode or field']); exit; }
+    $ok = $_POST['action'] === 'lock_field'
+        ? RmFieldLock::lock($db, $epNum, $field, 'admin', trim((string)($_POST['reason'] ?? '')) ?: null)
+        : RmFieldLock::unlock($db, $epNum, $field);
+    echo json_encode(['ok' => $ok]);
     exit;
 }
 
@@ -317,9 +349,19 @@ $prov      = new RmProvenance();
 $provData  = $prov->forEpisode((int)$ep['episode_number']);
 $provReady = rmScrapingTablesExist();
 $confColour = ['high'=>'#4ade80','medium'=>'#facc15','low'=>'#fb923c','conflict'=>'#f87171'];
+$fieldLocks = RmFieldLock::forEpisode($db, (int)$ep['episode_number']);
+$wholeLocked = isset($fieldLocks['*']);
 ?>
 <div class="ap">
-  <div class="sh">Data Provenance</div>
+  <div class="sh" style="display:flex;justify-content:space-between;align-items:center">
+    <span>Data Provenance</span>
+    <button class="btn btn-sm <?= $wholeLocked ? 'btn-dark' : 'btn-ghost' ?>" onclick="toggleLock('*', <?= $wholeLocked ? 'true' : 'false' ?>, this)">
+      <?= $wholeLocked ? '🔒 Whole episode locked — click to unlock' : '🔓 Lock whole episode' ?>
+    </button>
+  </div>
+  <?php if ($wholeLocked): ?>
+  <p style="font-size:.76rem;color:#fcd34d;margin:.4rem 0 0">This entire episode is locked — research and the AI layer will never write to any of its fields until it is unlocked.</p>
+  <?php endif; ?>
   <?php if (!$provReady): ?>
     <p style="font-size:.78rem;color:rgba(255,255,255,.35)">
       Provenance tracking is not installed yet. Install the engine tables from
@@ -333,15 +375,19 @@ $confColour = ['high'=>'#4ade80','medium'=>'#facc15','low'=>'#fb923c','conflict'
   <?php else: ?>
     <?php if ($provData['fields']): ?>
     <table class="atable" style="margin-bottom:1rem">
-      <thead><tr><th style="width:130px">Field</th><th>Source</th><th>Confidence</th><th>Agreed by</th><th>Disagreement</th><th>Updated</th></tr></thead>
+      <thead><tr><th style="width:130px">Field</th><th>Source</th><th>Confidence</th><th>Agreed by</th><th>Disagreement</th><th>Updated</th><th>Protection</th></tr></thead>
       <tbody>
-      <?php foreach ($provData['fields'] as $f): ?>
+      <?php foreach ($provData['fields'] as $f):
+        $fname = (string)$f['field_name'];
+        $locked = $wholeLocked || isset($fieldLocks[$fname]); ?>
         <tr>
-          <td style="font-weight:700"><?= h((string)$f['field_name']) ?></td>
+          <td style="font-weight:700"><?= h($fname) ?></td>
           <td>
             <?php if (!empty($f['source_url'])): ?>
               <a href="<?= h((string)$f['source_url']) ?>" target="_blank" rel="noopener"><?= h((string)$f['source_name']) ?></a>
             <?php else: ?><?= h((string)$f['source_name']) ?><?php endif; ?>
+            <?php if ($f['source_name'] === 'ai_generated'): ?><span style="background:rgba(168,85,247,.15);color:#c084fc;font-size:.62rem;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:.3rem">AI</span><?php endif; ?>
+            <?php if ($f['source_name'] === 'manual_verified'): ?><span style="background:rgba(34,197,94,.15);color:#86efac;font-size:.62rem;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:.3rem">MANUAL</span><?php endif; ?>
           </td>
           <td style="color:<?= $confColour[(string)$f['confidence']] ?? 'rgba(255,255,255,.4)' ?>;font-weight:700">
             <?= h(strtoupper((string)$f['confidence'])) ?>
@@ -351,6 +397,12 @@ $confColour = ['high'=>'#4ade80','medium'=>'#facc15','low'=>'#fb923c','conflict'
             <?= h((string)($f['conflicting'] ?: '—')) ?>
           </td>
           <td style="font-size:.72rem;color:rgba(255,255,255,.3)"><?= h(substr((string)$f['updated_at'], 0, 16)) ?></td>
+          <td>
+            <button class="btn btn-ghost btn-sm" style="font-size:.68rem;padding:2px 8px" <?= $wholeLocked ? 'disabled title="Locked at the whole-episode level"' : '' ?>
+                    onclick="toggleLock('<?= h($fname) ?>', <?= isset($fieldLocks[$fname]) ? 'true' : 'false' ?>, this)">
+              <?= isset($fieldLocks[$fname]) ? '🔒 Unlock' : '🔓 Lock' ?>
+            </button>
+          </td>
         </tr>
       <?php endforeach; ?>
       </tbody>
@@ -413,6 +465,20 @@ function openEp(){
   var n = parseInt(document.getElementById('jumpEp').value);
   if(!n||n<1){ return; }
   window.location.href = BP + '/admin/edit_episode.php?ep=' + n;
+}
+async function toggleLock(field, currentlyLocked, btn){
+  var epNum = <?= (int)$ep['episode_number'] ?>;
+  btn.disabled = true;
+  try {
+    var fd = new FormData();
+    fd.append('action', currentlyLocked ? 'unlock_field' : 'lock_field');
+    fd.append('episode_number', epNum);
+    fd.append('field', field);
+    var r = await fetch(BP + '/admin/edit_episode.php', { method: 'POST', body: fd });
+    var d = await r.json();
+    if (d.ok) { window.location.reload(); }
+    else { alert('Could not change the lock: ' + (d.error || 'unknown error')); btn.disabled = false; }
+  } catch (e) { alert('Request failed: ' + e.message); btn.disabled = false; }
 }
 function saveEp(){
   var form = document.getElementById('epForm');
