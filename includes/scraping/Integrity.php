@@ -481,4 +481,113 @@ class RmLatestEpisode
 
         return ['latest' => $latest, 'signals' => $signals, 'confidence' => $confidence, 'conflict' => $conflict, 'note' => $note];
     }
+
+    /**
+     * detect() answers "what's the highest episode NUMBER any source
+     * reports?" — that alone can't tell an aired episode from one that's
+     * merely been announced (a listing page can carry a preview row
+     * before broadcast). This runs the same collect → resolve pipeline
+     * every real episode goes through (RmScrapingEngine::collect() +
+     * RmFieldResolver::resolve() — field_priority, tiers, confidence,
+     * conflict detection, all of it) against each candidate episode past
+     * the archive's maximum, and classifies by the resolved air_date
+     * rather than assuming "next number = next aired episode".
+     *
+     * Read-only: this never writes provenance/health state and never
+     * touches the episodes table — it's a status check, not a scrape.
+     *
+     * @return array{
+     *   latest:?int, signals:array, confidence:string, conflict:bool, note:string,
+     *   db_max:int, source_status:array<string,array>,
+     *   latest_aired:?int, upcoming:array, missing_aired:array,
+     *   insufficient_evidence:int[], decision:string, decision_note:string
+     * }
+     */
+    public static function detectDetailed(array $opt = []): array
+    {
+        $base  = self::detect($opt);
+        $dbMax = $base['signals']['database'] ?? (new RmMissingData())->maxEpisode();
+
+        $registry = RmSourceRegistry::instance();
+        $sourceStatus = [];
+        foreach ((array)rmScrapeConfig('sources', []) as $name => $cfg) {
+            $label = $cfg['label'] ?? $name;
+            if (array_key_exists($name, $base['signals'])) {
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'ok', 'value' => $base['signals'][$name]];
+            } elseif (empty($cfg['enabled'])) {
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'disabled', 'value' => null];
+            } elseif (!$registry->usable($name)) {
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'unavailable', 'value' => null];
+            } else {
+                $sourceStatus[$name] = ['label' => $label, 'status' => 'no_signal', 'value' => null];
+            }
+        }
+        if (isset($base['signals']['myrunningman_probe'])) {
+            $sourceStatus['myrunningman_probe'] = [
+                'label' => 'myrunningman.com (gap probe)', 'status' => 'ok',
+                'value' => $base['signals']['myrunningman_probe'],
+            ];
+        }
+
+        $common = ['db_max' => $dbMax, 'source_status' => $sourceStatus,
+                   'upcoming' => [], 'missing_aired' => [], 'insufficient_evidence' => []];
+
+        $external = array_diff_key($base['signals'], ['database' => 1]);
+        if (!$external) {
+            return array_merge($base, $common, ['latest_aired' => $dbMax ?: null,
+                'decision' => 'source_unavailable',
+                'decision_note' => 'No external source responded — cannot confirm whether the archive is current.']);
+        }
+        if ($base['conflict']) {
+            return array_merge($base, $common, ['latest_aired' => $dbMax ?: null,
+                'decision' => 'source_disagreement', 'decision_note' => $base['note']]);
+        }
+
+        // Candidate episode numbers to actually resolve — the same
+        // target-selection RmMissingData already provides for scraping.
+        $candidates = [];
+        if ($base['latest'] && $base['latest'] > $dbMax) {
+            $targets = (new RmMissingData())->targetsFor('latest',
+                ['latest' => $base['latest'], 'max_new' => (int)($opt['max_new'] ?? 10)]);
+            foreach ($targets['episodes'] as $n) if ($n > $dbMax) $candidates[] = $n;
+        }
+
+        $upcoming = []; $missingAired = []; $insufficient = [];
+        $today = date('Y-m-d');
+        foreach ($candidates as $n) {
+            $payloads = rmEngine()->collect($n, ['air_date', 'title'], ['read_only' => true])['payloads'];
+            if (!$payloads) { $insufficient[] = $n; continue; }
+            $resolved = (new RmFieldResolver())->resolve($payloads, ['episode_number' => $n, 'expected_year' => rmYear($n)]);
+            $airDate  = $resolved['air_date']['value'] ?? null;
+            if (!$airDate) { $insufficient[] = $n; continue; }
+            $entry = [
+                'episode'    => $n,
+                'title'      => $resolved['title']['value'] ?? null,
+                'air_date'   => $airDate,
+                'confidence' => $resolved['air_date']['confidence'] ?? null,
+                'sources'    => $resolved['air_date']['sources'] ?? [],
+            ];
+            if ($airDate <= $today) $missingAired[] = $entry; else $upcoming[] = $entry;
+        }
+
+        if ($missingAired) {
+            $decision = 'missing_episodes';
+            $decisionNote = count($missingAired) . ' aired episode(s) confirmed by live sources are not yet in the database.';
+        } elseif ($insufficient) {
+            $decision = 'insufficient_evidence';
+            $decisionNote = 'A newer episode number was reported, but no source could confirm an air date for it — nothing inserted.';
+        } elseif ($upcoming) {
+            $decision = 'up_to_date';
+            $decisionNote = 'Database matches every confirmed aired episode; EP' . $upcoming[0]['episode'] . ' is announced but not yet aired.';
+        } else {
+            $decision = 'up_to_date';
+            $decisionNote = 'Database matches every confirmed aired episode.';
+        }
+
+        return array_merge($base, $common, [
+            'upcoming' => $upcoming, 'missing_aired' => $missingAired, 'insufficient_evidence' => $insufficient,
+            'latest_aired' => $missingAired ? max(array_column($missingAired, 'episode')) : ($dbMax ?: null),
+            'decision' => $decision, 'decision_note' => $decisionNote,
+        ]);
+    }
 }

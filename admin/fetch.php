@@ -19,19 +19,12 @@ if (isset($_GET['a'])) {
     set_time_limit(60);
 
     if ($_GET['a'] === 'check') {
-        $force  = isset($_GET['ep']) ? (int)$_GET['ep'] : null;
-        $latest = $force ?: rmGetLatestEpNumber();
-        // Sanity: reject obviously wrong numbers
-        if ($latest && ($latest > 2000 || $latest < 100)) $latest = null;
-        $newEps = [];
-        if ($latest && $latest > $dbMax)
-            for ($i = $dbMax+1; $i <= min($dbMax+20, $latest); $i++) $newEps[] = $i;
-        echo json_encode([
-            'db_max'  => $dbMax,
-            'latest'  => $latest,
-            'new'     => $newEps,
-            'warning' => ($latest && $latest > 2000) ? "Detected EP$latest seems wrong" : null,
-        ]);
+        // Runs the actual PR4 research pipeline (multi-signal latest
+        // detection + per-candidate collect/resolve against live
+        // sources) rather than trusting one source's episode count —
+        // see RmLatestEpisode::detectDetailed().
+        $d = rmGetLatestEpDetection();
+        echo json_encode($d);
         exit;
     }
 
@@ -153,24 +146,31 @@ $recent=$db->query("SELECT episode_number,title,air_date,verification_required F
 $missingThumbs=(int)$db->query("SELECT COUNT(*) FROM episodes e WHERE NOT EXISTS(SELECT 1 FROM thumbnails t WHERE t.thumbnail_id=e.thumbnail_id AND t.verified=1 AND t.local_path IS NOT NULL)")->fetchColumn();
 ?>
 
-<div class="at"><h1>⚡ Fetch Latest Episode</h1><p>Detect new episodes on myrm.tv → scrape → save.</p></div>
+<div class="at"><h1>⚡ Fetch Latest Episode</h1><p>Multi-source research detection → scrape → save.</p></div>
 
 <?php if ($msg): ?><div class="aok"><?= htmlspecialchars($msg) ?></div><?php endif; ?>
 <?php if ($err): ?><div class="aerr">⚠ <?= htmlspecialchars($err) ?></div><?php endif; ?>
 
 <!-- Status hero -->
 <div class="ap" style="background:linear-gradient(135deg,#0e1420 0%,#062040 100%);margin-bottom:1.5rem">
-  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem">
-    <div>
-      <div style="font-size:.72rem;color:rgba(255,255,255,.4);margin-bottom:.5rem">
-        DB latest: <strong style="color:#FFD700">EP<?= str_pad($dbMax,3,'0',STR_PAD_LEFT) ?></strong>
-        &nbsp;·&nbsp; <span id="myrmStatus">Checking myrm.tv…</span>
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1.5rem">
+    <div style="display:flex;gap:1.75rem;flex-wrap:wrap">
+      <div>
+        <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.32);margin-bottom:.25rem">Database</div>
+        <div style="font-size:1.1rem;font-weight:800;color:#FFD700">EP<?= str_pad($dbMax,3,'0',STR_PAD_LEFT) ?></div>
       </div>
-      <div style="display:flex;gap:.5rem;flex-wrap:wrap" id="newEpBtns"></div>
+      <div>
+        <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.32);margin-bottom:.25rem">Latest Aired</div>
+        <div id="latestAiredVal" style="font-size:1.1rem;font-weight:800;color:#86efac">Checking…</div>
+      </div>
+      <div id="upcomingBox" style="display:none">
+        <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.32);margin-bottom:.25rem">Upcoming</div>
+        <div id="upcomingVal" style="font-size:1.1rem;font-weight:800;color:#29ABE2"></div>
+      </div>
     </div>
     <div style="display:flex;flex-direction:column;gap:.5rem;align-items:flex-end">
       <button class="btn" id="btnCheck" onclick="checkNew()">🔍 Check for New EPs</button>
-      <button class="btn btn-dark btn-sm" onclick="fetchEp(<?= $dbMax+1 ?>)">⚡ Quick: EP<?= str_pad($dbMax+1,3,'0',STR_PAD_LEFT) ?></button>
+      <button class="btn btn-dark btn-sm" id="btnQuick" style="display:none"></button>
       <button class="btn btn-dark btn-sm" onclick="var n=prompt('Enter EP number:');if(n&&+n>0)fetchEp(+n)">🔢 Manual EP entry</button>
     </div>
   </div>
@@ -187,8 +187,13 @@ $missingThumbs=(int)$db->query("SELECT COUNT(*) FROM episodes e WHERE NOT EXISTS
 
 <!-- Detect result -->
 <div class="ap" id="detectPanel">
-  <div class="sh">Detection Result</div>
-  <div id="detectMsg" style="color:rgba(255,255,255,.4);font-size:.85rem">Click "Check for New EPs" to detect what's new.</div>
+  <div class="sh">Decision</div>
+  <div id="detectMsg" style="color:rgba(255,255,255,.4);font-size:.85rem;margin-bottom:1rem">Click "Check for New EPs" to run detection.</div>
+  <div id="newEpBtns" style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem"></div>
+  <div id="sourceStatusWrap" style="display:none">
+    <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28);margin-bottom:.5rem">Source Status</div>
+    <div id="sourceStatus" style="display:flex;gap:.4rem;flex-wrap:wrap"></div>
+  </div>
 </div>
 
 <!-- Scrape + form (hidden until scrape) -->
@@ -275,23 +280,58 @@ function toast(m){var t=document.getElementById('toast');if(!t){t=document.creat
 
 window.addEventListener('load',()=>setTimeout(checkNew,700));
 
+var STATUS_COLOR={ok:'#86efac',unavailable:'#f59e0b',disabled:'rgba(255,255,255,.25)',no_signal:'rgba(255,255,255,.35)'};
+var STATUS_LABEL={ok:null,unavailable:'unavailable',disabled:'disabled',no_signal:'no signal'};
+var DECISION_COLOR={missing_episodes:'#29ABE2',source_disagreement:'#fcd34d',source_unavailable:'#fcd34d',insufficient_evidence:'#fcd34d',up_to_date:'#86efac'};
+var DECISION_ICON={missing_episodes:'🆕',source_disagreement:'⚠',source_unavailable:'⚠',insufficient_evidence:'⚠',up_to_date:'✓'};
+
 function checkNew(){
   var btn=document.getElementById('btnCheck');
   btn.innerHTML='<span class="spin"></span> Checking…';btn.disabled=true;
   fetch(BP+'/admin/fetch.php?a=check')
     .then(r=>r.json()).then(d=>{
       btn.innerHTML='🔍 Check for New EPs';btn.disabled=false;
-      var s=document.getElementById('myrmStatus');
-      if(d.warning){s.innerHTML='<span style="color:#fcd34d">⚠ '+d.warning+' — use manual entry</span>'}
-      else s.innerHTML=d.latest?'myrm.tv: <strong style="color:#29ABE2">EP'+pad(d.latest)+'</strong>':'Could not reach myrm.tv';
+
+      document.getElementById('latestAiredVal').textContent = d.latest_aired ? 'EP'+pad(d.latest_aired) : '—';
+
+      var ub=document.getElementById('upcomingBox'), uv=document.getElementById('upcomingVal');
+      if(d.upcoming && d.upcoming.length){
+        ub.style.display='';
+        uv.textContent='EP'+pad(d.upcoming[0].episode)+(d.upcoming[0].air_date?' ('+d.upcoming[0].air_date+')':'');
+      } else ub.style.display='none';
+
+      var ss=document.getElementById('sourceStatus'), ssw=document.getElementById('sourceStatusWrap');
+      if(d.source_status){
+        ssw.style.display='';
+        ss.innerHTML=Object.keys(d.source_status).map(function(k){
+          var s=d.source_status[k], color=STATUS_COLOR[s.status]||'rgba(255,255,255,.35)';
+          var text=s.status==='ok' ? 'EP'+pad(s.value) : (STATUS_LABEL[s.status]||s.status);
+          return '<span style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:5px;padding:3px 8px;font-size:.7rem;color:'+color+'"><strong style="color:rgba(255,255,255,.5)">'+s.label+':</strong> '+text+'</span>';
+        }).join('');
+      } else ssw.style.display='none';
+
       var dm=document.getElementById('detectMsg');
       var bb=document.getElementById('newEpBtns');
-      if(!d.new||!d.new.length){dm.innerHTML='<span style="color:#86efac">✓ Database is up to date (EP'+pad(d.db_max)+')</span>';bb.innerHTML='';step(1);}
-      else{
-        dm.innerHTML='<strong style="color:#eef2f8">'+d.new.length+' new episode'+(d.new.length>1?'s':'')+' available!</strong>';
-        bb.innerHTML=d.new.slice(0,10).map(n=>'<button onclick="fetchEp('+n+')" class="btn btn-sm">⚡ EP'+pad(n)+'</button>').join('');
-        if(d.new.length>10) bb.innerHTML+='<span style="color:rgba(255,255,255,.3);font-size:.8rem;align-self:center">+'+((d.new.length-10))+' more</span>';
-        step(2);if(d.new.length)fetchEp(d.new[0]);
+      var color=DECISION_COLOR[d.decision]||'rgba(255,255,255,.4)', icon=DECISION_ICON[d.decision]||'';
+      dm.innerHTML='<span style="color:'+color+'">'+icon+' '+(d.decision_note||'')+'</span>';
+      bb.innerHTML='';
+
+      var quick=document.getElementById('btnQuick');
+      if(d.decision==='missing_episodes' && d.missing_aired.length){
+        bb.innerHTML=d.missing_aired.slice(0,10).map(function(e){
+          return '<button onclick="fetchEp('+e.episode+')" class="btn btn-sm">⚡ EP'+pad(e.episode)+'<span style="opacity:.6;font-weight:400"> · '+e.air_date+(e.confidence?' · '+e.confidence:'')+'</span></button>';
+        }).join('');
+        quick.style.display='';
+        quick.textContent='⚡ Quick: EP'+pad(d.missing_aired[0].episode);
+        quick.onclick=function(){fetchEp(d.missing_aired[0].episode)};
+        step(2); fetchEp(d.missing_aired[0].episode);
+      } else {
+        quick.style.display='none';
+        step(1);
+      }
+
+      if(d.insufficient_evidence && d.insufficient_evidence.length && d.decision!=='missing_episodes'){
+        bb.innerHTML='<span style="color:rgba(255,255,255,.35);font-size:.78rem;align-self:center">Unconfirmed candidate(s): '+d.insufficient_evidence.map(pad).join(', ')+' — use manual entry if you can verify the air date yourself.</span>';
       }
     }).catch(()=>{btn.innerHTML='🔍 Check for New EPs';btn.disabled=false;});
 }
