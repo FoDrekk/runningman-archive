@@ -1,8 +1,10 @@
 <?php
 require_once __DIR__ . '/../includes/functions.php';
+require_once __DIR__ . '/../includes/components.php';
 $yearStats = getYearStats();
 $totalEps  = array_sum(array_column($yearStats, 'total_episodes'));
 $pageTitle = 'Browse by Year';
+$pageDescription = 'Browse Running Man episodes year by year, from 2010 to present.';
 include __DIR__ . '/../includes/header.php';
 ?>
 <div style="padding-top:2rem">
@@ -24,18 +26,9 @@ include __DIR__ . '/../includes/header.php';
 
 <div class="year-grid" style="margin-bottom:3rem">
 <?php foreach (array_reverse($yearStats) as $y):
-  if (!$y['total_episodes']) continue; ?>
-<a href="<?= bp() ?>/search.php?year=<?= $y['year_label'] ?>" class="year-card">
-  <div class="yr"><?= $y['year_label'] ?></div>
-  <div class="yr-range">
-    EP<?= str_pad($y['first_ep'],3,'0',STR_PAD_LEFT) ?>–EP<?= str_pad($y['last_ep'],3,'0',STR_PAD_LEFT) ?>
-  </div>
-  <div class="yr-count"><?= $y['total_episodes'] ?> episodes</div>
-  <?php if ($y['specials']??0): ?>
-  <div style="font-size:.68rem;color:var(--t4);margin-top:.18rem"><?= $y['specials'] ?> specials</div>
-  <?php endif; ?>
-</a>
-<?php endforeach; ?>
+  if (!$y['total_episodes']) continue;
+  echo renderYearCard($y);
+endforeach; ?>
 </div>
 <?php endif; ?>
 </div>

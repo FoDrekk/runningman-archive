@@ -1,11 +1,15 @@
 <?php
 require_once __DIR__ . '/../includes/functions.php';
-$db      = getDB();
-$themes  = getThemes(); // Only themes that have episodes linked
+require_once __DIR__ . '/../includes/components.php';
+$db        = getDB();
+$themes    = getThemes(); // Only themes that have episodes linked
+foreach ($themes as &$t) $t['thumb'] = getRepresentativeThumb('e.theme_id = ?', [$t['theme_id']]);
+unset($t);
 $allThemes = $db->query("SELECT * FROM themes ORDER BY name")->fetchAll();
 $totalEps  = (int)$db->query("SELECT COUNT(*) FROM episodes")->fetchColumn();
 $hasThemed = (int)$db->query("SELECT COUNT(*) FROM episodes WHERE theme_id IS NOT NULL")->fetchColumn();
 $pageTitle = 'Themes';
+$pageDescription = 'Browse Running Man episodes by mission theme.';
 include __DIR__ . '/../includes/header.php';
 ?>
 <div style="padding-top:2rem">
@@ -18,7 +22,7 @@ include __DIR__ . '/../includes/header.php';
 </div>
 
 <?php if (!empty($allThemes)): ?>
-<div class="sh">Available Themes</div>
+<div class="sec-h">Available Themes</div>
 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.75rem;margin-bottom:2rem">
 <?php foreach ($allThemes as $t): ?>
 <div style="background:var(--s1);border:1px solid var(--b1);border-radius:var(--rm);padding:1.1rem;opacity:.6">
@@ -30,21 +34,15 @@ include __DIR__ . '/../includes/header.php';
 </div>
 <?php endforeach; ?>
 </div>
+<?php else: ?>
+<?= renderEmptyState('🎭', 'No themes defined', 'Themes appear here once the archive has some.') ?>
 <?php endif; ?>
 
 <?php else: ?>
 
+<p style="color:var(--t3);font-size:.85rem;margin-bottom:1.5rem"><?= count($themes) ?> theme<?= count($themes)===1?'':'s' ?> across <?= number_format($totalEps) ?> episodes.</p>
 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:1rem;margin-bottom:3rem">
-<?php foreach ($themes as $t): ?>
-<a href="<?= bp() ?>/search.php?theme_id=<?= $t['theme_id'] ?>"
-   class="card" style="padding:1.4rem;text-decoration:none;color:inherit;display:block">
-  <div style="font-weight:700;font-size:.95rem;color:var(--t1);margin-bottom:.35rem"><?= h($t['name']) ?></div>
-  <?php if ($t['description']): ?>
-  <div style="font-size:.78rem;color:var(--t3);margin-bottom:.65rem;line-height:1.5"><?= h($t['description']) ?></div>
-  <?php endif; ?>
-  <span class="badge b-blue"><?= $t['episode_count'] ?> episodes</span>
-</a>
-<?php endforeach; ?>
+<?php foreach ($themes as $t): ?><?= renderThemeCard($t) ?><?php endforeach; ?>
 </div>
 
 <?php endif; ?>

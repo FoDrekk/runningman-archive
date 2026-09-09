@@ -1,152 +1,157 @@
 <?php
 require_once __DIR__ . '/includes/functions.php';
-$bp        = bp();
-$cssV      = @filemtime(__DIR__.'/assets/css/style.css') ?: 1;
-$stats     = getStats();
-$yearStats = getYearStats();
-$recent    = getEpisodeList(1, 10)['episodes'];
+require_once __DIR__ . '/includes/components.php';
+
+$bp2      = bp();
+$hero     = getLatestAiredEpisode();
+$latest   = getRecentAiredEpisodes(12, $hero['episode_number'] ?? null);
+$featured = getFeaturedEpisodes(10);
+$themes   = getThemesForDiscovery(6);
+$onThisDay= getOnThisDay(8);
+$years    = getYearStats();
+$stats    = getArchiveStats();
+
+$heroSrc = $hero ? thumbSrc($hero) : '';
+$heroDesc = $hero ? (($hero['synopsis'] ?? '') ?: generateEpisodeSummary($hero, [])) : '';
+
+$pageDescription = 'The complete Running Man fan archive — every episode, guest, mission and location since 2010, searchable by year, theme and special.';
+$ogImage = $heroSrc ?: null;
+include __DIR__ . '/includes/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=1200">
-<title>Home | Running Man Archive</title>
-<link rel="stylesheet" href="<?= $bp ?>/assets/css/style.css?v=<?= $cssV ?>">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
-</head>
-<body>
 
-<header class="site-header">
-  <div class="container">
-    <div class="header-inner">
-      <a href="<?= $bp ?>/index.php" class="site-logo">
-        <div class="logo-circle"><span class="logo-r">R</span></div>
-        <div class="logo-text">
-          <span class="logo-name">Running Man</span>
-          <span class="logo-sub">Archive</span>
-        </div>
-      </a>
-      <nav class="site-nav">
-        <a href="<?= $bp ?>/index.php" class="active">Home</a>
-        <a href="<?= $bp ?>/search.php">Episodes</a>
-        <a href="<?= $bp ?>/pages/specials.php">Specials</a>
-        <a href="<?= $bp ?>/pages/themes.php">Themes</a>
-        <a href="<?= $bp ?>/pages/years.php">By Year</a>
-        <a href="<?= $bp ?>/admin/" class="nav-cta">⚡ Admin</a>
-      </nav>
+<!-- ══ HERO: latest AIRED episode (never an upcoming one) ══ -->
+<?php if ($hero): $hn = str_pad((string)$hero['episode_number'], 3, '0', STR_PAD_LEFT); ?>
+<section class="hero-ep">
+  <?php if ($heroSrc): ?>
+    <img src="<?= h($heroSrc) ?>" alt="" class="hero-ep-bg" loading="eager">
+  <?php else: ?>
+    <div class="hero-ep-noimg" aria-hidden="true">R</div>
+  <?php endif; ?>
+  <div class="hero-ep-scrim"></div>
+  <div class="hero-ep-body">
+    <span class="hero-ep-eyebrow">🏃 Latest Aired · Episode #<?= $hn ?></span>
+    <h2><?= h(displayTitle($hero['title'] ?? '')) ?></h2>
+    <div class="hero-ep-meta">
+      <?php if (!empty($hero['air_date'])): ?><span>📅 <?= h($hero['air_date']) ?></span><?php endif; ?>
+      <?php if (!empty($hero['location_name'])): ?><span>📍 <?= h($hero['location_name']) ?></span><?php endif; ?>
+      <?php if (!empty($hero['guests'])): ?><span>👥 <?= count($hero['guests']) ?> guest<?= count($hero['guests'])===1?'':'s' ?></span><?php endif; ?>
+      <?php if (!empty($hero['is_special'])): ?><span class="badge b-yel">⭐ Special</span><?php endif; ?>
     </div>
-  </div>
-</header>
-
-<main class="site-main" style="padding-top:0">
-
-<!-- HERO -->
-<section class="hero">
-  <div class="container">
-    <div class="hero-inner" style="justify-content:center">
-      <div class="hero-copy">
-        <div class="hero-eyebrow">🏃 SBS 런닝맨 · Running Man · 2010–Present</div>
-        <h1>Every Episode.<br><em>Every Race. Every Guest.</em></h1>
-        <p class="hero-desc">The complete Running Man fan archive — searchable by episode, special type, theme, and year.</p>
-        <div class="hero-stats">
-          <div class="hero-stat"><span class="num"><?= number_format($stats['total']) ?></span><span class="lbl">Episodes</span></div>
-          <div class="hero-stat"><span class="num">EP<?= str_pad($stats['last_ep'],3,'0',STR_PAD_LEFT) ?></span><span class="lbl">Latest</span></div>
-          <div class="hero-stat"><span class="num"><?= $stats['pct'] ?>%</span><span class="lbl">Complete</span></div>
-        </div>
-      </div>
-
+    <?php if ($heroDesc): ?><p class="hero-ep-desc"><?= h(mb_strimwidth((string)$heroDesc, 0, 220, '…')) ?></p><?php endif; ?>
+    <div class="hero-ep-actions">
+      <a href="<?= h(episodeUrl((int)$hero['episode_number'])) ?>" class="btn btn-yel">▶ Watch Details</a>
+      <a href="<?= $bp2 ?>/search.php" class="btn btn-dark">Explore Archive</a>
     </div>
   </div>
 </section>
+<?php else: ?>
+<?= renderEmptyState('🏃', 'No episodes yet', 'The archive is empty — sync data from Admin to get started.') ?>
+<?php endif; ?>
 
-<div class="container" style="padding-top:3rem">
+<!-- ══ CONTINUE BROWSING (localStorage-only, hidden until populated) ══ -->
+<section id="continueBrowsing" hidden aria-label="Continue browsing">
+  <div class="rail-head"><h2 class="sec-h" style="margin-bottom:0">Continue Browsing</h2></div>
+  <div class="rail-viewport"><div class="rail"></div></div>
+</section>
 
-<!-- SEARCH -->
-<form method="GET" action="<?= $bp ?>/search.php">
+<!-- ══ SEARCH ══ -->
+<form method="GET" action="<?= $bp2 ?>/search.php" role="search">
   <div class="search-wrap">
-    <span class="search-icon">🔍</span>
-    <input type="text" name="q" placeholder="Search episodes, missions, locations…" autocomplete="off">
+    <span class="search-icon" aria-hidden="true">🔍</span>
+    <label for="homeSearch" class="sr-only">Search episodes</label>
+    <input type="text" id="homeSearch" name="q" placeholder="Search episodes, missions, locations, guests…" autocomplete="off">
     <button type="submit">Search</button>
   </div>
 </form>
 
-<!-- TOPIC TILES -->
+<!-- ══ TOPIC TILES ══ -->
 <div class="topic-strip">
-  <a href="<?= $bp ?>/pages/specials.php?type=chuseok"    class="topic-tile tt-1"><span class="tile-icon">🌕</span>Chuseok Specials</a>
-  <a href="<?= $bp ?>/pages/specials.php?type=overseas"   class="topic-tile tt-2"><span class="tile-icon">✈️</span>Overseas Trips</a>
-  <a href="<?= $bp ?>/pages/specials.php?type=milestone"  class="topic-tile tt-3"><span class="tile-icon">🏆</span>Milestone EPs</a>
-  <a href="<?= $bp ?>/pages/specials.php?type=farewell"   class="topic-tile tt-4"><span class="tile-icon">👋</span>Farewell Episodes</a>
-  <a href="<?= $bp ?>/search.php?special=0"               class="topic-tile tt-5"><span class="tile-icon">🏃</span>Regular Races</a>
+  <a href="<?= $bp2 ?>/pages/specials.php?type=chuseok"   class="topic-tile tt-1"><span class="tile-icon">🌕</span>Chuseok Specials</a>
+  <a href="<?= $bp2 ?>/pages/specials.php?type=overseas"  class="topic-tile tt-2"><span class="tile-icon">✈️</span>Overseas Trips</a>
+  <a href="<?= $bp2 ?>/pages/specials.php?type=milestone" class="topic-tile tt-3"><span class="tile-icon">🏆</span>Milestone EPs</a>
+  <a href="<?= $bp2 ?>/pages/specials.php?type=farewell"  class="topic-tile tt-4"><span class="tile-icon">👋</span>Farewell Episodes</a>
+  <a href="<?= $bp2 ?>/search.php?special=0"              class="topic-tile tt-5"><span class="tile-icon">🏃</span>Regular Races</a>
 </div>
 
-<!-- LATEST EPISODES -->
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem">
-  <h2 class="sec-h" style="margin-bottom:0;flex:1">Latest Episodes</h2>
-  <a href="<?= $bp ?>/search.php" class="btn btn-ghost btn-sm">Browse all <?= number_format($stats['total']) ?> →</a>
-</div>
-<div class="ep-grid" style="margin-bottom:2.5rem">
-<?php foreach ($recent as $ep):
-  $n = str_pad($ep['episode_number'],3,'0',STR_PAD_LEFT);
-  $src = thumbSrc($ep); ?>
-<div class="card ep-card" data-href="<?= $bp ?>/episode.php?ep=<?= $ep['episode_number'] ?>" tabindex="0">
-  <div class="ep-thumb">
-    <?php if ($src): ?>
-      <img src="<?= h($src) ?>" alt="Episode #<?= $n ?>" loading="lazy">
-    <?php else: ?>
-      <div class="thumb-ph">R</div>
-    <?php endif; ?>
-    <span class="ep-num-badge">EP<?= $n ?></span>
+<!-- ══ LATEST EPISODES ══ -->
+<section aria-label="Latest episodes" style="margin-bottom:2.75rem">
+<?= renderRail('Latest Episodes', $latest, $bp2 . '/search.php') ?>
+</section>
+
+<!-- ══ FEATURED EPISODES ══ -->
+<section aria-label="Featured episodes" style="margin-bottom:2.75rem">
+<?= renderRail('Featured Episodes', $featured, $bp2 . '/search.php', fn($ep) => renderEpisodeCard($ep, ['synopsis' => true]), 'Nothing to feature yet — keep the archive syncing.') ?>
+</section>
+
+<!-- ══ ON THIS DAY ══ -->
+<section aria-label="On this day" style="margin-bottom:2.75rem">
+  <div class="rail-head"><h2 class="sec-h" style="margin-bottom:0">On This Day</h2><span style="font-size:.78rem;color:var(--t4)"><?= date('F j') ?></span></div>
+  <?php if ($onThisDay): ?>
+  <div class="related-grid">
+    <?php foreach ($onThisDay as $ep): $on = str_pad((string)$ep['episode_number'],3,'0',STR_PAD_LEFT); $osrc = thumbSrc($ep); ?>
+    <a href="<?= h(episodeUrl((int)$ep['episode_number'])) ?>" class="otd-card">
+      <div class="otd-thumb"><?php if ($osrc): ?><img src="<?= h($osrc) ?>" alt="" loading="lazy"><?php else: ?><div class="thumb-ph">R</div><?php endif; ?></div>
+      <div><div class="otd-year"><?= h(substr((string)$ep['air_date'],0,4)) ?> · EP<?= $on ?></div>
+      <div class="otd-title"><?= h(displayTitle($ep['title'] ?? '')) ?></div></div>
+    </a>
+    <?php endforeach; ?>
   </div>
-  <div class="ep-body">
-    <span class="ep-num">Episode #<?= $n ?></span>
-    <div class="ep-title">
-      <?php
-      $t = $ep['title'] ?? '';
-      echo h(preg_match('/^Episode\s*#\d+\s*-\s*(.+)$/i',$t,$m) ? $m[1] : ($t ?: 'Running Man'));
-      ?>
-    </div>
-    <div class="ep-date"><?= h($ep['air_date'] ?? '') ?></div>
-    <div class="ep-meta">
-      <?php if ($ep['is_special']): ?><span class="badge b-yel">⭐ Special</span><?php endif; ?>
-      <?php if ($ep['theme_name']): ?><span class="badge b-gray"><?= h($ep['theme_name']) ?></span><?php endif; ?>
-    </div>
+  <?php else: ?>
+  <?= renderEmptyState('📅', 'No episodes on this day', 'No aired episode in the archive shares today\'s calendar date — check back tomorrow.') ?>
+  <?php endif; ?>
+</section>
+
+<!-- ══ BROWSE BY THEME ══ -->
+<section aria-label="Browse by theme" style="margin-bottom:2.75rem">
+  <div class="rail-head"><h2 class="sec-h" style="margin-bottom:0">Browse by Theme</h2>
+    <a href="<?= $bp2 ?>/pages/themes.php" class="btn btn-ghost btn-sm">View all →</a>
   </div>
-</div>
-<?php endforeach; ?>
-</div>
-
-<!-- YEAR GRID -->
-<h2 class="sec-h">Browse by Year</h2>
-<div class="year-grid" style="margin-bottom:3rem">
-<?php foreach (array_reverse($yearStats) as $y): if (!$y['total_episodes']) continue; ?>
-<a href="<?= $bp ?>/search.php?year=<?= $y['year_label'] ?>" class="year-card">
-  <div class="yr"><?= $y['year_label'] ?></div>
-  <div class="yr-range">EP<?= str_pad($y['first_ep'],3,'0',STR_PAD_LEFT) ?>–EP<?= str_pad($y['last_ep'],3,'0',STR_PAD_LEFT) ?></div>
-  <div class="yr-count"><?= $y['total_episodes'] ?> episodes</div>
-</a>
-<?php endforeach; ?>
-</div>
-
-</div>
-</main>
-
-<footer class="site-footer">
-  <div class="container">
-    <div class="footer-inner">
-      <div>
-        <div class="footer-brand"><div class="footer-logo">R</div><span class="footer-name">Running Man Archive</span></div>
-        <p class="footer-note">Fan archive · SBS 런닝맨 2010–present · Data sourced from myrm.tv &amp; myrunningman.com</p>
-      </div>
-      <nav class="footer-links">
-        <a href="<?= $bp ?>/index.php">Home</a>
-        <a href="<?= $bp ?>/search.php">Episodes</a>
-        <a href="<?= $bp ?>/pages/specials.php">Specials</a>
-        <a href="<?= $bp ?>/admin/">Admin</a>
-      </nav>
-    </div>
+  <?php if ($themes): ?>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1rem">
+    <?php foreach ($themes as $t): ?><?= renderThemeCard($t) ?><?php endforeach; ?>
   </div>
-</footer>
-<script src="<?= $bp ?>/assets/js/main.js"></script>
-</body></html>
+  <?php else: ?>
+  <?= renderEmptyState('🎭', 'No themes assigned yet', 'Themes are populated automatically as episode data syncs.') ?>
+  <?php endif; ?>
+</section>
+
+<!-- ══ EXPLORE BY YEAR ══ -->
+<section aria-label="Explore by year" style="margin-bottom:2.75rem">
+  <h2 class="sec-h">Explore by Year</h2>
+  <?php $realYears = array_values(array_filter(array_reverse($years), fn($y) => $y['total_episodes'])); ?>
+  <?php if ($realYears): ?>
+  <div class="year-grid">
+    <?php foreach ($realYears as $y): ?><?= renderYearCard($y) ?><?php endforeach; ?>
+  </div>
+  <?php else: ?>
+  <?= renderEmptyState('🗓️', 'No years yet', 'Import or sync episode data to populate the archive by year.') ?>
+  <?php endif; ?>
+</section>
+
+<!-- ══ SPECIALS ══ -->
+<?php $specialEps = array_filter($latest, fn($e) => !empty($e['is_special'])); ?>
+<section aria-label="Specials" style="margin-bottom:1rem">
+<?= renderRail('Specials', array_slice(array_values($specialEps), 0, 8), $bp2 . '/pages/specials.php', null, 'No special episodes found in recent airings — see the full Specials page.') ?>
+</section>
+
+<!-- ══ SURPRISE ME ══ -->
+<section class="surprise-panel" aria-label="Surprise me">
+  <div class="surprise-copy">
+    <h2>Feeling lucky?</h2>
+    <p>Jump to a random, reasonably complete episode from the archive — no episode number required.</p>
+  </div>
+  <a href="<?= $bp2 ?>/surprise.php" class="btn btn-yel">🎲 Surprise Me</a>
+</section>
+
+<!-- ══ ARCHIVE STATISTICS ══ -->
+<section aria-label="Archive statistics">
+  <h2 class="sec-h">Archive at a Glance</h2>
+  <?= renderStatsSection($stats) ?>
+</section>
+
+<?php include __DIR__ . '/includes/footer.php'; ?>
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  if (window.rmInitContinueBrowsing) window.rmInitContinueBrowsing('continueBrowsing', '<?= h($bp2) ?>');
+});
+</script>

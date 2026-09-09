@@ -1,13 +1,17 @@
 <?php
 require_once __DIR__ . '/includes/functions.php';
+require_once __DIR__ . '/includes/components.php';
 $epNum = (int)($_GET['ep'] ?? 0);
 if (!$epNum) { header('Location: '.bp().'/search.php'); exit; }
 
 $ep = getEpisode($epNum);
 if (!$ep) {
-    $pageTitle = 'Not Found';
+    http_response_code(404);
+    $pageTitle = 'Episode Not Found';
+    $pageDescription = 'This episode number does not exist in the Running Man Archive.';
     include __DIR__ . '/includes/header.php';
-    echo '<div class="alert alert-err" style="margin-top:2rem">Episode not found.</div>';
+    echo renderEmptyState('🔍', 'Episode not found', "There's no record of episode #$epNum in the archive.",
+        '<a href="' . h(bp()) . '/search.php" class="btn">Browse all episodes</a>');
     include __DIR__ . '/includes/footer.php';
     exit;
 }
@@ -64,6 +68,17 @@ $hasNotes    = hasVal($ep['special_notes'] ?? null);
 $generatedSummary = $hasSynopsis
     ? null
     : generateEpisodeSummary($ep, ['main_mission','teams','results','location_name']);
+
+$hasTheme = hasVal($ep['theme_name'] ?? null);
+$related  = getRelatedEpisodes($ep, 6);
+
+// SEO — derived only from real episode fields, never invented.
+$pageDescription = $hasSynopsis
+    ? mb_strimwidth((string)$ep['synopsis'], 0, 160, '…')
+    : ($generatedSummary ? mb_strimwidth($generatedSummary, 0, 160, '…')
+        : "Episode #$padded of Running Man" . ($hasDate ? ' — aired ' . $ep['air_date'] : '') . '.');
+$ogImage = $src ?: null;
+$canonicalPath = bp() . '/episode.php?ep=' . $epNum;
 
 include __DIR__ . '/includes/header.php';
 ?>
@@ -133,6 +148,15 @@ include __DIR__ . '/includes/header.php';
           <?php if ($hasLocation): ?>
             <?= h($ep['location_name']) ?><?= !empty($ep['location_country']) ? ' — '.h($ep['location_country']) : '' ?>
             <?php if ($ep['is_overseas'] ?? false): ?><span class="badge b-blue" style="margin-left:.3rem">✈ Overseas</span><?php endif; ?>
+          <?php else: ?><span class="na">N/A</span><?php endif; ?>
+        </span>
+      </div>
+
+      <div class="ep-meta-row">
+        <span class="ep-meta-ic">🎭</span><span class="ep-meta-l">Theme:</span>
+        <span class="ep-meta-v">
+          <?php if ($hasTheme): ?>
+            <a href="<?= h(bp()) ?>/search.php?theme_id=<?= (int)$ep['theme_id'] ?>" class="ep-meta-link"><?= h($ep['theme_name']) ?></a>
           <?php else: ?><span class="na">N/A</span><?php endif; ?>
         </span>
       </div>
@@ -242,6 +266,19 @@ include __DIR__ . '/includes/header.php';
   </a>
   <?php else: ?><span></span><?php endif; ?>
 </div>
+
+<?php if ($related): ?>
+<section aria-label="Related episodes" style="margin-top:2.75rem">
+  <h2 class="sec-h">Related Episodes</h2>
+  <div class="related-grid">
+    <?php foreach ($related as $r): ?>
+      <?= renderEpisodeCard($r, ['meta' => false]) ?>
+    <?php endforeach; ?>
+  </div>
+</section>
+<?php endif; ?>
+
 </div>
 <style>.na{color:var(--t4);font-style:italic;font-weight:400}</style>
+<script>if (window.rmRecordVisit) window.rmRecordVisit(<?= (int)$epNum ?>);</script>
 <?php include __DIR__ . '/includes/footer.php'; ?>

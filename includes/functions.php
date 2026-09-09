@@ -56,12 +56,13 @@ function getEpisodeList(int $page = 1, int $perPage = 24, array $f = []): array 
     // but LIMIT/OFFSET must be bound explicitly as integers. So bind the
     // WHERE params positionally first, then the two integer params with an
     // explicit PARAM_INT type.
+    $orderDir = (($f['sort'] ?? 'newest') === 'oldest') ? 'ASC' : 'DESC';
     $rows = $db->prepare("
         SELECT e.episode_number, e.title, e.air_date, e.synopsis,
                e.is_special, e.special_type, e.verification_required,
                y.year_label, t.name AS theme_name,
                th.local_path AS thumbnail_path, th.verified AS thumb_verified
-        $sql ORDER BY e.episode_number DESC LIMIT ? OFFSET ?
+        $sql ORDER BY e.episode_number $orderDir LIMIT ? OFFSET ?
     ");
     $bindPos = 1;
     foreach ($params as $p) { $rows->bindValue($bindPos++, $p); }
@@ -270,3 +271,9 @@ function generateEpisodeSummary(array $ep, array $excludeShown = []): ?string {
 
     return $parts ? implode(' ', $parts) : null;
 }
+
+// PR #5 public discovery/homepage queries (latest aired, featured, on
+// this day, surprise me, archive stats, related episodes) live in their
+// own file — required here so every page that already includes
+// functions.php gets them without an extra require line.
+require_once __DIR__ . '/public_data.php';
