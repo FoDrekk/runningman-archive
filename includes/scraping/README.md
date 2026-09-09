@@ -138,20 +138,58 @@ candidate whose *only* witnesses are verification-only sources, and
 metadata from one — it can corroborate the real winner or raise a
 conflict for review, never become the value written.
 
+## AI reasoning (PR #4)
+
+AI is a reasoning service, not a chatbot, and it is optional exactly
+like a keyed source: no `RM_AI_API_KEY`/`ANTHROPIC_API_KEY` means the
+layer reports itself unavailable and every caller falls back to its
+own safe default. It is consulted in exactly two places:
+
+- **`RmAiDecisionProvider`** (`AiReasoning.php`) plugs into
+  `RmDecisionEngine`'s existing provider seam and is asked ONLY about
+  decisions the deterministic rules already classified `REVIEW` — a
+  genuine conflict between well-supported sources. It may only choose
+  among the candidate values it was shown; it can never write a value
+  no source actually offered.
+- **`RmAiSynopsisService`** (`AiSynopsis.php`) drafts a synopsis when
+  one is missing and the archive already holds enough verified facts
+  (title, guests, mission, location, special notes) to write from.
+  A usable existing synopsis is never rewritten. Every draft is checked
+  by **`RmGroundingValidator`** (`GroundingValidator.php`) against that
+  same evidence — an invented guest, location or outcome fails
+  grounding, triggers one revision attempt, and is rejected outright if
+  still unsupported. Confidence thresholds (`config/scraping.php` →
+  `ai.thresholds`) then decide the outcome: high-confidence in `auto`
+  mode is `GENERATE`, `review` mode (the default) always holds a
+  grounded draft for a person, and anything below the review threshold
+  is `INSUFFICIENT_EVIDENCE`. Every decision — including a refusal — is
+  written to `ai_generation_log` when `database/pr4_ai_diagnostics.sql`
+  is installed, so "why does EP809 have an AI-generated synopsis?" and
+  "how many drafts were rejected this month?" both have an answer.
+
+`RmFieldLock` (`FieldLock.php`, same migration) protects manually
+verified data absolutely: a locked field is forced to `KEEP` before
+either the deterministic engine or the AI layer ever sees a threshold.
+
 ## Tests
 
 ```
 php includes/scraping/selftest.php   # normalisation, validation, resolution
 php tests/adapter_contract.php       # every adapter × every malformed response
 php tests/resolution.php             # conflicts, guests, thumbnails
+php tests/ai.php                     # AI grounding, synopsis decisions, thresholds
 php tests/migration.php --fresh      # the migration is additive and idempotent
 php tests/integration.php            # write path, modes, dry run, cron recovery
+php tests/research.php               # run state, evidence, decisions, research memory
 ```
 
-All five are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the
-HTTP client refuse every non-loopback request, so no test can reach a
-live source. Fixtures are served from a local server in
-`tests/fixtures/`. The last two need MySQL/MariaDB and skip cleanly
+All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP
+client refuse every non-loopback request, so no test can reach a live
+source — including `api.anthropic.com`, for `tests/ai.php`, which uses
+a fake, injectable AI client (`RmAiClient`'s own seam) for every
+GENERATE/REJECT/REQUEST_REVIEW path. Fixtures are served from a local
+server in `tests/fixtures/`. `migration.php`, `integration.php`,
+`research.php` and part of `ai.php` need MySQL/MariaDB and skip cleanly
 without one. CI runs all of them (`.github/workflows/php.yml`).
 
 Set `RM_SCRAPE_OFFLINE=1` yourself whenever you want to be certain a

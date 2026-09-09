@@ -56,6 +56,10 @@ require_once __DIR__ . '/Evidence.php';
 require_once __DIR__ . '/Decision.php';
 require_once __DIR__ . '/Anomaly.php';
 require_once __DIR__ . '/Discovery.php';
+require_once __DIR__ . '/FieldLock.php';
+require_once __DIR__ . '/GroundingValidator.php';
+require_once __DIR__ . '/AiReasoning.php';
+require_once __DIR__ . '/AiSynopsis.php';
 require_once __DIR__ . '/ResearchService.php';
 
 /** Shared engine instance for page code. */
