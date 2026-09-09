@@ -1,24 +1,57 @@
 <?php
-// BUGFIX: AJAX/action handlers MUST run before layout.php — same rule
-// followed everywhere else in /admin (see auto_sync.php, fetch.php,
-// health.php, thumbnails.php for the identical comment). This was the
-// one file that didn't follow it: layout.php prints the full HTML page
-// the instant it's required (no output buffering), so by the time the
-// "?s=1" check ran below, the entire dashboard page had already been
-// sent to the browser. The JSON response ended up as
-// "<html>...sidebar...<main>{"total":807,...}" — invalid JSON. The
-// dashboard's own fetch('index.php?s=1').then(r=>r.json()) at the
-// bottom of this page silently failed and hit .catch(()=>{}), which is
-// exactly why the 5 stat boxes (Total Episodes, Missing #s, etc.) and
-// the progress bar stayed stuck on the loading skeleton/"Loading…"
-// forever — no error ever surfaced, it just never populated.
+// ============================================================
+// Admin Dashboard — PR #4 rework.
+//
+// The old dashboard answered "how many episodes exist?". This one
+// answers the four questions every admin page has to (spec section 33):
+// what is the archive's actual state, why does it need attention,
+// what would fixing it involve, and where do you go to act on it.
+//
+// Deliberately DB-only: archive health, source health and last-run
+// info all come from stored state (research_state, source_health,
+// scrape_runs), never a live network probe — a dashboard that blocks
+// on external requests on every page load is not a dashboard. Live
+// verification (source probes, latest-episode detection) stays an
+// explicit action on Diagnostics / the Research Centre, one click away.
+// ============================================================
 if (isset($_GET['s'])) {
     require_once __DIR__ . '/config.php';
     require_once __DIR__ . '/../config/db.php';
     require_once __DIR__ . '/../includes/functions.php';
     adminCheck();
     header('Content-Type: application/json');
-    echo json_encode(getStats());
+    if (ob_get_level() > 0) ob_clean();
+
+    $stats = getStats();
+    $extra = [
+        'health' => ['episodes'=>0,'completeness'=>0,'conflicts'=>0,'needs_review'=>0,
+                      'stale'=>0,'low_confidence'=>0,'incomplete'=>0],
+        'last_run'      => null,
+        'source_health' => ['healthy' => 0, 'total' => 0],
+    ];
+    try {
+        require_once __DIR__ . '/../includes/scraping/bootstrap.php';
+        $extra['health'] = (new RmResearchState())->archiveHealth();
+
+        $run = RmScrapeRun::latest();
+        if ($run) {
+            $extra['last_run'] = [
+                'mode'        => $run['mode'] ?? $run['research_mode'] ?? null,
+                'status'      => $run['status'] ?? null,
+                'finished_at' => $run['finished_at'] ?? $run['started_at'] ?? null,
+                'summary'     => $run['summary'] ?? $run['notes'] ?? null,
+            ];
+        }
+
+        $sources = RmSourceHealth::instance()->all();
+        $healthyStatuses = ['ok', 'unknown'];   // never-yet-checked reads as healthy, not broken
+        $extra['source_health'] = [
+            'healthy' => count(array_filter($sources, fn($s) => in_array($s['status'] ?? 'unknown', $healthyStatuses, true))),
+            'total'   => count($sources),
+        ];
+    } catch (Throwable $e) { /* PR #4 tables/engine not installed yet — dashboard still works */ }
+
+    echo json_encode($stats + $extra);
     exit;
 }
 
@@ -37,20 +70,45 @@ $logLines = array_filter(array_slice(explode("\n", trim($cronLog)), -6));
 
 <div class="at"><h1>Dashboard</h1><p>Running Man Archive · <?= date('d M Y') ?></p></div>
 
+<!-- Archive health — the four questions every admin page owes an answer to -->
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.9rem;margin-bottom:1.6rem">
+  <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.2rem">
+    <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28);margin-bottom:.5rem">Latest Aired vs Database</div>
+    <div style="display:flex;align-items:baseline;gap:.5rem">
+      <span id="st-lastep" style="font-size:1.5rem;font-weight:900;color:#FFD700">…</span>
+      <span style="font-size:.7rem;color:rgba(255,255,255,.3)">in the database</span>
+    </div>
+    <div style="font-size:.72rem;color:rgba(255,255,255,.4);margin-top:.4rem">
+      To verify against live sources: <a href="<?= bp() ?>/admin/diagnostics.php" style="color:#29ABE2">Diagnostics → Source Health</a>
+    </div>
+  </div>
+  <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.2rem">
+    <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28);margin-bottom:.5rem">Last Research Run</div>
+    <div id="st-lastrun" style="font-size:.95rem;font-weight:700;color:#eef2f8">Loading…</div>
+    <div id="st-lastrun-detail" style="font-size:.72rem;color:rgba(255,255,255,.4);margin-top:.3rem"></div>
+  </div>
+  <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.2rem">
+    <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28);margin-bottom:.5rem">Source Health</div>
+    <div id="st-srchealth" style="font-size:1.5rem;font-weight:900">…</div>
+    <div style="font-size:.72rem;color:rgba(255,255,255,.4);margin-top:.3rem"><a href="<?= bp() ?>/admin/diagnostics.php" style="color:#29ABE2">View detail →</a></div>
+  </div>
+</div>
+
 <!-- Stats — skeleton, loaded async -->
-<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:.9rem;margin-bottom:1.6rem">
+<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:.8rem;margin-bottom:1.6rem">
   <?php foreach ([
     ['st-total', 'Episodes',      '#FFD700'],
     ['st-miss',  'Missing #s',    '#86efac'],
     ['st-syn',   'No Synopsis',   '#fcd34d'],
     ['st-thumb', 'No Thumbnail',  '#fcd34d'],
+    ['st-review','Needs Review',  '#fca5a5'],
     ['st-pct',   'Complete',      '#29ABE2'],
   ] as [$id,$lbl,$col]): ?>
-  <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.3rem 1.1rem;text-align:center">
-    <div id="<?= $id ?>" style="font-size:1.8rem;font-weight:900;letter-spacing:-.04em;margin-bottom:.18rem;color:<?= $col ?>">
-      <div style="background:rgba(41,171,226,.08);border-radius:4px;height:2.2rem;animation:sk 1.2s infinite"></div>
+  <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.1rem .9rem;text-align:center">
+    <div id="<?= $id ?>" style="font-size:1.55rem;font-weight:900;letter-spacing:-.04em;margin-bottom:.18rem;color:<?= $col ?>">
+      <div style="background:rgba(41,171,226,.08);border-radius:4px;height:2rem;animation:sk 1.2s infinite"></div>
     </div>
-    <div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28)"><?= $lbl ?></div>
+    <div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28)"><?= $lbl ?></div>
   </div>
   <?php endforeach; ?>
 </div>
@@ -71,11 +129,11 @@ $logLines = array_filter(array_slice(explode("\n", trim($cronLog)), -6));
 <div style="font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:rgba(41,171,226,.4);margin-bottom:.9rem">Quick Actions</div>
 <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:.75rem;margin-bottom:1.75rem">
   <?php foreach ([
-    ['⚡','Fetch Latest EP',  'fetch.php',      true],
-    ['⏱️','Weekly Update',    'cron.php',       true],
-    ['🔄','Auto Sync Data',   'auto_sync.php',       false],
-    ['🖼️','Grab Thumbnails', 'thumbnails.php', false],
-    ['📥','Import Excel/CSV', 'import.php',      false],
+    ['⚡','Research Latest', 'scraper.php',              true],
+    ['🧩','Fill Missing',    'scraper.php',              true],
+    ['🚩','Review Issues',   'scraper.php#needs-review', false],
+    ['🩺','Diagnostics',     'diagnostics.php',          false],
+    ['📥','Import Excel/CSV','import.php',               false],
   ] as [$ic,$lbl,$url,$pri]): ?>
   <a href="<?= bp().'/'.'admin/'.$url ?>"
      style="background:<?= $pri?'rgba(255,215,0,.06)':'#0e1420' ?>;border:1px solid <?= $pri?'rgba(255,215,0,.22)':'rgba(41,171,226,.1)' ?>;border-radius:12px;padding:1.1rem 1rem;text-decoration:none;color:#eef2f8;transition:.18s;text-align:center;display:flex;flex-direction:column;align-items:center;gap:.4rem">
@@ -127,6 +185,31 @@ fetch('index.php?s=1')
     document.getElementById('prog-lbl').textContent='EP'+d.first_ep+'–EP'+d.last_ep;
     document.getElementById('prog-val').textContent=d.total+' / '+d.expected+' · '+d.pct+'%';
     setTimeout(()=>document.getElementById('prog-bar').style.width=Math.min(d.pct,100)+'%',120);
+
+    var h = d.health || {};
+    c('st-review', h.needs_review ?? 0, (h.needs_review ?? 0) > 0 ? '#fca5a5' : '#86efac');
+    c('st-lastep', 'EP' + String(d.last_ep).padStart(3,'0'));
+
+    var lr = d.last_run;
+    var lrEl = document.getElementById('st-lastrun'), lrDetail = document.getElementById('st-lastrun-detail');
+    if (lr) {
+      var statusColor = lr.status === 'completed' ? '#86efac' : (lr.status === 'failed' ? '#fca5a5' : '#fcd34d');
+      lrEl.innerHTML = '<span style="color:'+statusColor+'">' + (lr.status || 'unknown') + '</span>' + (lr.mode ? ' · ' + lr.mode : '');
+      lrDetail.textContent = (lr.finished_at || '') + (lr.summary ? ' — ' + lr.summary : '');
+    } else {
+      lrEl.textContent = 'No run yet';
+      lrDetail.innerHTML = '<a href="scraper.php" style="color:#29ABE2">Start one →</a>';
+    }
+
+    var sh = d.source_health || {healthy:0,total:0};
+    var shEl = document.getElementById('st-srchealth');
+    if (sh.total > 0) {
+      shEl.textContent = sh.healthy + '/' + sh.total;
+      shEl.style.color = sh.healthy === sh.total ? '#86efac' : (sh.healthy >= sh.total * 0.6 ? '#fcd34d' : '#fca5a5');
+    } else {
+      shEl.textContent = '—';
+      shEl.style.color = 'rgba(255,255,255,.3)';
+    }
   }).catch(()=>{});
 </script>
 </body></html>

@@ -521,7 +521,7 @@ CSS;
     <?php endif; ?>
   </div>
 
-  <div class="ap">
+  <div class="ap" id="needs-review">
     <div class="sh">Needs Review</div>
     <?php if (!$flags): ?>
       <div class="sc-meta">Nothing flagged. Duplicates, near-identical guest names and source conflicts appear here — they are never resolved automatically.</div>
