@@ -72,12 +72,20 @@ function pageState(PDO $db): array
 
     RmResearchRun::reapStalled();          // a walked-away run becomes resumable, not stuck
 
-    $current = RmResearchRun::current();
-    $last    = RmResearchRun::last();
-    $health  = $state->archiveHealth();
-    $counts  = $state->eligibleCount();
-    // The last detection, remembered so the header is not blank on load.
-    $latest  = (int)stateGet('internet_latest', 0) ?: null;
+    $current  = RmResearchRun::current();
+    $last     = RmResearchRun::last();
+    $health   = $state->archiveHealth();
+    $counts   = $state->eligibleCount();
+    // Archive COVERAGE (does it exist / what does live evidence say the
+    // archive should have) is a separate axis from archiveHealth() above
+    // (metadata enrichment gaps) — PR11 §2. DB-only on page load, same
+    // rule every dashboard here follows; the live evidence-based
+    // detection (RmLatestEpisode::detectDetailed(), PR9/PR10 — never the
+    // older vote-only RmDiscovery::latestEpisode() this used to read)
+    // only runs on the explicit "Detect Latest" click below, and is
+    // cached here so the header isn't blank until someone clicks it.
+    $cachedDetection = json_decode((string)stateGet('latest_detection', ''), true);
+    $coverage = $state->archiveCoverage(200, is_array($cachedDetection) ? $cachedDetection : null);
 
     $sources = [];
     foreach (RmSourceHealth::instance()->all() as $name => $h) {
@@ -102,9 +110,8 @@ function pageState(PDO $db): array
     return [
         'ok'        => true,
         'ready'     => $ready,
-        'archive'   => $health + [
-            'db_max'          => (new RmMissingData($db))->maxEpisode(),
-            'internet_latest' => $latest,
+        'archive'   => $health + $coverage + [
+            'db_max'          => $coverage['archive_latest'],
             'eligible'        => $counts['eligible'],
             'resting'         => $counts['resting'],
         ],
@@ -131,18 +138,28 @@ if ($action === 'install') {
 }
 
 if ($action === 'detect_latest') {
-    $det = RmDiscovery::latestEpisode();
-    $dbMax = (new RmMissingData($db))->maxEpisode();
-    if ($det['latest'] !== null) stateSet('internet_latest', (int)$det['latest']);
+    // The one place this page contacts live sources — an explicit click,
+    // never automatic. Uses the same evidence-based detector Maintenance
+    // uses (RmLatestEpisode::detectDetailed(), PR9/PR10): aired vs
+    // upcoming vs source disagreement vs insufficient evidence, never a
+    // bare vote count from the older RmDiscovery::latestEpisode(). The
+    // full result is cached so archiveCoverage() can show it on the next
+    // page load without contacting anything.
+    $det = RmLatestEpisode::detectDetailed();
+    stateSet('latest_detection', json_encode($det));
+    $coverage = (new RmResearchService($db))->state()->archiveCoverage(200, $det);
     asJson([
-        'ok'       => $det['latest'] !== null,
-        'latest'   => $det['latest'],
-        'db_max'   => $dbMax,
-        'new'      => $det['latest'] !== null ? max(0, $det['latest'] - $dbMax) : 0,
-        'confidence' => $det['confidence'],
-        'votes'    => $det['votes'],
-        'conflict' => !empty($det['conflict']),
-        'note'     => $det['note'],
+        'ok'                    => true,
+        'decision'              => $det['decision'],
+        'decision_note'         => $det['decision_note'],
+        'latest_verified_aired' => $coverage['latest_verified_aired'],
+        'upcoming'              => $coverage['upcoming'],
+        'archive_latest'        => $coverage['archive_latest'],
+        'missing_count'         => $coverage['missing_count'],
+        'missing_range'         => $coverage['missing_range'],
+        'confidence'            => $det['confidence'],
+        'conflict'              => $det['conflict'],
+        'source_status'         => $det['source_status'],
     ]);
 }
 
@@ -476,16 +493,42 @@ function toneColour(string $tone): string
 </div>
 <?php endif; ?>
 
-<!-- ══ 1. ARCHIVE STATE ═══════════════════════════════════════ -->
+<!-- ══ 1. ARCHIVE COVERAGE — does the episode exist? (PR11 §4/§15) ═══ -->
+<div class="sc-meta" style="margin-bottom:.4rem">Archive Coverage — episode existence, never metadata enrichment</div>
+<div class="rc-grid" style="margin-bottom:1.3rem">
+  <div class="rc-stat"><b style="color:#FFD700"><?= number_format($archive['stored_episodes']) ?></b><span>Stored episodes</span></div>
+  <div class="rc-stat"><b><?= $archive['archive_latest'] ? 'EP'.(int)$archive['archive_latest'] : '—' ?></b><span>Archive latest</span></div>
+  <div class="rc-stat">
+    <b id="netLatest" style="color:<?= $archive['latest_verified_aired'] ? '#86efac' : 'rgba(255,255,255,.3)' ?>"
+       title="<?= h($archive['decision_note']) ?>">
+      <?= $archive['latest_verified_aired'] ? 'EP'.(int)$archive['latest_verified_aired']
+          : ($archive['decision']==='SOURCE_DISAGREEMENT' ? 'Source disagreement'
+             : ($archive['decision']==='NOT_CHECKED' ? 'Not checked' : 'Unknown')) ?>
+    </b><span>Latest verified aired</span>
+  </div>
+  <div class="rc-stat"><b id="netUpcoming" style="color:<?= $archive['upcoming'] ? '#29ABE2' : 'rgba(255,255,255,.3)' ?>">
+      <?= $archive['upcoming'] ? 'EP'.(int)$archive['upcoming'] : 'None verified' ?>
+    </b><span>Upcoming</span></div>
+  <div class="rc-stat"><b style="color:<?= $archive['missing_count'] ? '#fcd34d' : '#4ade80' ?>"><?= number_format($archive['missing_count']) ?></b><span>Missing episodes</span>
+    <?php if ($archive['missing_range']): ?><span class="sc-meta" style="margin-top:.15rem"><?= h($archive['missing_range']) ?></span><?php endif; ?>
+  </div>
+</div>
+
+<!-- ══ 2. METADATA HEALTH — core vs enrichment (PR11 §5/§16) ═══════ -->
+<div class="sc-meta" style="margin-bottom:.4rem">Metadata Health — title + air date only; enrichment gaps are Insufficient Evidence below, not "incomplete episodes"</div>
+<div class="rc-grid" style="margin-bottom:1.3rem">
+  <div class="rc-stat"><b style="color:<?= $archive['core']['pct'] >= 95 ? '#4ade80' : '#fcd34d' ?>"><?= (int)$archive['core']['pct'] ?>%</b><span>Core complete</span></div>
+  <div class="rc-stat"><b style="color:<?= $archive['core']['core_partial'] ? '#fcd34d' : '#4ade80' ?>"><?= number_format($archive['core']['core_partial']) ?></b><span>Core partial<br><span style="text-transform:none;letter-spacing:0">(missing title/air date)</span></span></div>
+</div>
+
+<!-- ══ 3. RESEARCH STATE (PR11 §6) ═════════════════════════════════ -->
+<div class="sc-meta" style="margin-bottom:.4rem">Research State — what the research system knows, separate from source health</div>
 <div class="rc-grid">
-  <div class="rc-stat"><b style="color:#FFD700"><?= number_format($archive['episodes']) ?></b><span>Episodes</span></div>
-  <div class="rc-stat"><b>EP<?= (int)$archive['db_max'] ?></b><span>Archive latest</span></div>
-  <div class="rc-stat"><b id="netLatest" style="color:rgba(255,255,255,.3)">?</b><span>Internet latest</span></div>
-  <div class="rc-stat"><b style="color:<?= $archive['completeness'] >= 90 ? '#4ade80' : '#fcd34d' ?>"><?= (int)$archive['completeness'] ?>%</b><span>Complete</span></div>
-  <div class="rc-stat"><b style="color:<?= $archive['incomplete'] ? '#fcd34d' : '#4ade80' ?>"><?= number_format($archive['incomplete']) ?></b><span>Incomplete</span></div>
   <div class="rc-stat"><b style="color:<?= $archive['conflicts'] ? '#f87171' : 'inherit' ?>"><?= (int)$archive['conflicts'] ?></b><span>Conflicts</span></div>
   <div class="rc-stat"><b style="color:<?= $S['reviews'] ? '#fcd34d' : 'inherit' ?>"><?= (int)$S['reviews'] ?></b><span>Needs review</span></div>
   <div class="rc-stat"><b><?= (int)$archive['stale'] ?></b><span>Stale</span></div>
+  <div class="rc-stat"><b><?= (int)$archive['never_researched'] ?></b><span>Never researched</span></div>
+  <div class="rc-stat"><b><?= (int)($archive['locked_episodes'] ?? 0) ?></b><span>Locked fields<br><span style="text-transform:none;letter-spacing:0">(manually pinned)</span></span></div>
 </div>
 
 <!-- ══ 2. CURRENT RUN ═════════════════════════════════════════ -->
@@ -537,9 +580,10 @@ function toneColour(string $tone): string
 
   <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.85rem">
     <button class="btn btn-dark" onclick="detectLatest(this)">Detect latest</button>
-    <button class="btn" onclick="startRun('new')">Research new</button>
-    <button class="btn" onclick="startRun('missing')">Research missing<span id="eligibleHint" class="sc-meta" style="margin-left:.35rem"></span></button>
-    <button class="btn btn-dark" onclick="startRun('missing',{force:1,limit:200})">Research everything</button>
+    <button class="btn" onclick="startRun('new')" title="Genuinely absent episode numbers — a coverage gap">Research Missing Episodes</button>
+    <button class="btn" onclick="startRun('missing')" title="Existing episodes with an empty enrichment field"
+            >Fill Missing Metadata<span id="eligibleHint" class="sc-meta" style="margin-left:.35rem"></span></button>
+    <button class="btn btn-dark" onclick="startRun('missing',{force:1,limit:200})">Research Everything (Metadata)</button>
     <button class="btn btn-dark" onclick="singleEpisode(false)">Single episode</button>
     <button class="btn btn-ghost" onclick="singleEpisode(true)">Dry run</button>
   </div>
@@ -710,22 +754,30 @@ function renderRun(s){
   // incomplete archive are both true at once, and saying so removes
   // the only genuinely confusing thing about this page.
   const box = document.getElementById('runVsArchive');
-  if (s.last && !s.current && s.last.remaining === 0 && s.archive.incomplete > 0) {
+  // s.attention.incomplete is the correctly-scoped count: episodes that
+  // have ALREADY been researched and still lack an enrichment field no
+  // source publishes (INSUFFICIENT_EVIDENCE) — never episodes that
+  // simply haven't been looked at yet (those are "never researched").
+  const insufficientEvidence = (s.attention && s.attention.incomplete) ? s.attention.incomplete.count : 0;
+  if (s.last && !s.current && s.last.remaining === 0 && insufficientEvidence > 0) {
     box.style.display = '';
     document.getElementById('runVsArchiveText').textContent =
       'Run ' + s.last.ref + ' processed everything it queued (' + s.last.processed + ' of ' + s.last.requested +
-      ', 0 remaining). The archive still has ' + s.archive.incomplete + ' incomplete episode(s), because ' +
-      'no public source publishes the data they are missing. Those are not waiting in a queue — they have been ' +
+      ', 0 remaining). ' + insufficientEvidence + ' episode(s) still have INSUFFICIENT EVIDENCE for an enrichment ' +
+      'field, because no public source publishes it. Those are not waiting in a queue — they have been ' +
       'researched and recorded as such.';
   } else { box.style.display = 'none'; }
 
   const hint = document.getElementById('eligibleNote');
   hint.textContent = s.archive.incomplete
-    ? s.archive.eligible + ' of ' + s.archive.incomplete + ' incomplete episodes are due to be looked at again; ' +
+    ? s.archive.eligible + ' of ' + s.archive.incomplete + ' episodes with a metadata gap are due to be looked at again; ' +
       s.archive.resting + ' were researched recently and are resting until there is a reason to re-ask.'
-    : 'Every episode in the archive is complete.';
+    : 'Every episode in the archive has full core metadata.';
   document.getElementById('eligibleHint').textContent = s.archive.eligible ? '(' + s.archive.eligible + ')' : '';
-  if (s.archive.internet_latest) document.getElementById('netLatest').textContent = 'EP' + s.archive.internet_latest;
+  const netLatest = document.getElementById('netLatest');
+  if (s.archive.latest_verified_aired) { netLatest.textContent = 'EP' + s.archive.latest_verified_aired; netLatest.style.color = '#86efac'; }
+  else if (s.archive.decision === 'SOURCE_DISAGREEMENT') { netLatest.textContent = 'Source disagreement'; netLatest.style.color = '#fcd34d'; }
+  document.getElementById('netUpcoming').textContent = s.archive.upcoming ? 'EP' + s.archive.upcoming : 'None verified';
 }
 
 async function refreshState(){
@@ -748,7 +800,10 @@ async function startRun(scope, extra){
     limit: document.getElementById('sLimit') ? document.getElementById('sLimit').value : 50,
   }, extra||{});
   if (scope === 'range'){ p.from = document.getElementById('sFrom').value; p.to = document.getElementById('sTo').value; }
-  if (scope === 'new'){ const d = await api('detect_latest'); p.latest = d.latest || 0; }
+  // Confirmed-aired ceiling only — never the raw "sources mention this
+  // number" value, so an announced-but-unaired episode is never queued
+  // as if it had already aired (PR11 §6/§9).
+  if (scope === 'new'){ const d = await api('detect_latest'); p.latest = d.latest_verified_aired || d.archive_latest || 0; }
 
   const r = await api('run_start', p);
   if (!r.ok){ toast(r.error || 'Could not start the run'); await refreshState(); return; }
@@ -808,18 +863,29 @@ function appendActivity(rows){
 }
 
 // ── Latest-episode detection ─────────────────────────────────
+// Evidence-based (RmLatestEpisode::detectDetailed(), PR9/PR10): aired vs
+// upcoming vs source disagreement vs insufficient evidence. Never
+// invents a number — an unreachable/disagreeing result says so in
+// words instead of falling back to a guess.
 async function detectLatest(btn){
   if (btn){ btn.disabled = true; btn.textContent = 'Asking sources…'; }
   const d = await api('detect_latest');
   if (btn){ btn.disabled = false; btn.textContent = 'Detect latest'; }
-  if (!d.ok){ toast(d.note || 'No source could be asked'); return; }
-  document.getElementById('netLatest').textContent = 'EP' + d.latest;
-  document.getElementById('netLatest').style.color = d.new > 0 ? '#4ade80' : 'inherit';
-  toast(d.new > 0
-    ? d.new + ' new episode(s): archive is at EP' + d.db_max + ', sources say EP' + d.latest
-    : 'Up to date at EP' + d.latest + ' (' + d.confidence + ' confidence)');
+  if (!d.ok){ toast('No source could be asked'); return; }
+  const netLatest = document.getElementById('netLatest');
+  if (d.latest_verified_aired) { netLatest.textContent = 'EP' + d.latest_verified_aired; netLatest.style.color = '#86efac'; }
+  else if (d.decision === 'SOURCE_DISAGREEMENT') { netLatest.textContent = 'Source disagreement'; netLatest.style.color = '#fcd34d'; }
+  else { netLatest.textContent = 'Unknown'; netLatest.style.color = 'rgba(255,255,255,.3)'; }
+  document.getElementById('netUpcoming').textContent = d.upcoming ? 'EP' + d.upcoming : 'None verified';
+
+  const missing = d.missing_count > 0
+    ? d.missing_count + ' missing episode(s)' + (d.missing_range ? ' (' + d.missing_range + ')' : '')
+    : null;
+  toast(missing
+    ? missing + ': archive is at EP' + d.archive_latest + ', latest verified aired is EP' + d.latest_verified_aired
+    : (d.latest_verified_aired ? 'Up to date at EP' + d.latest_verified_aired + ' (' + d.confidence + ' confidence)' : d.decision_note));
   if (d.conflict) appendActivity([{at:new Date().toTimeString().slice(0,8), level:'warning',
-    message:'Sources disagree on the latest episode — ' + d.note}]);
+    message:'Sources disagree on the latest episode — ' + d.decision_note}]);
 }
 
 // ── Buckets ──────────────────────────────────────────────────

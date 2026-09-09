@@ -164,6 +164,76 @@ class RmMissingData
         } catch (Throwable $e) { return []; }
     }
 
+    /**
+     * How many STORED episodes are missing each field — one COUNT per
+     * field in a single pass, for a dashboard's "Metadata Health"
+     * breakdown (PR11 §5). Same predicates as incompleteEpisodes(),
+     * just aggregated instead of listed per-episode, and over every
+     * stored episode rather than capped at a page limit.
+     *
+     * @return array<string,int> field => count of episodes missing it
+     */
+    public function fieldGapCounts(array $onlyFields = []): array
+    {
+        if ($this->db === null) return [];
+        $conds = [
+            'title'     => "(e.title IS NULL OR e.title = '' OR e.title NOT LIKE '%% - %%')",
+            'air_date'  => 'e.air_date IS NULL',
+            'synopsis'  => "(e.synopsis IS NULL OR e.synopsis = '')",
+            'mission'   => "(e.main_mission IS NULL OR e.main_mission = '')",
+            'location'  => 'e.location_id IS NULL',
+            'theme'     => 'e.theme_id IS NULL',
+            'guests'    => 'NOT EXISTS (SELECT 1 FROM episode_guests eg WHERE eg.episode_id = e.episode_id)',
+            'thumbnail' => '(t.thumbnail_id IS NULL OR t.verified = 0)',
+        ];
+        if ($this->hasTeamsResults()) {
+            $conds['teams']   = "(e.teams IS NULL OR e.teams = '')";
+            $conds['results'] = "(e.results IS NULL OR e.results = '')";
+        }
+        $wanted = $onlyFields ? array_intersect_key($conds, array_flip($onlyFields)) : $conds;
+        if (!$wanted) return [];
+
+        try {
+            $sql = 'SELECT ' . implode(', ', array_map(fn($f, $c) => "SUM($c) AS $f", array_keys($wanted), $wanted))
+                 . ' FROM episodes e LEFT JOIN thumbnails t ON t.thumbnail_id = e.thumbnail_id';
+            $row = $this->db->query($sql)->fetch();
+            $out = [];
+            foreach (array_keys($wanted) as $f) $out[$f] = (int)($row[$f] ?? 0);
+            return $out;
+        } catch (Throwable $e) { return []; }
+    }
+
+    /**
+     * CORE fields only — title and air_date. Everything else tracked by
+     * gaps()/incompleteEpisodes() (synopsis, mission, teams, results,
+     * location, theme, guests, thumbnail) is enrichment: useful, tracked
+     * separately (fieldGapCounts()), but a public source simply not
+     * publishing a synopsis for an old episode does not make that
+     * episode's ARCHIVE record incomplete (PR11 §5/§16). This is the one
+     * completeness percentage that should ever be shown as the archive's
+     * headline "% Complete" — the any-of-9-fields definition is a
+     * research-queue targeting predicate, not a coverage metric.
+     */
+    const CORE = ['title', 'air_date'];
+
+    /** @return array{total:int,core_complete:int,core_partial:int,pct:int} */
+    public function coreCompleteness(): array
+    {
+        if ($this->db === null) return ['total' => 0, 'core_complete' => 0, 'core_partial' => 0, 'pct' => 0];
+        try {
+            $total = (int)$this->db->query('SELECT COUNT(*) FROM episodes')->fetchColumn();
+            if ($total === 0) return ['total' => 0, 'core_complete' => 0, 'core_partial' => 0, 'pct' => 0];
+            $partial = (int)$this->db->query(
+                "SELECT COUNT(*) FROM episodes e WHERE
+                    (e.title IS NULL OR e.title = '' OR e.title NOT LIKE '%% - %%')
+                    OR e.air_date IS NULL"
+            )->fetchColumn();
+            $complete = $total - $partial;
+            return ['total' => $total, 'core_complete' => $complete, 'core_partial' => $partial,
+                    'pct' => (int)round($complete / $total * 100)];
+        } catch (Throwable $e) { return ['total' => 0, 'core_complete' => 0, 'core_partial' => 0, 'pct' => 0]; }
+    }
+
     /** Episodes whose last scrape failed, from the provenance table. */
     public function failedEpisodes(int $limit = 200): array
     {

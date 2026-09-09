@@ -302,14 +302,20 @@ class RmResearchState
      */
     public function attention(int $perBucket = 500): array
     {
+        // PR11 §3/§8/§11: label these for what they actually are. "new" is
+        // genuinely MISSING EPISODES (absent from the database entirely —
+        // a coverage gap), never confused with "incomplete", which is
+        // metadata enrichment INSUFFICIENT_EVIDENCE for an episode that
+        // already exists and has already been researched. Same buckets,
+        // same underlying logic — only the label was ever wrong.
         $buckets = [
-            'new'              => ['label' => 'New',              'hint' => 'Aired but not in the archive yet',                 'episodes' => []],
+            'new'              => ['label' => 'Missing Episodes',  'hint' => 'Aired but not in the archive yet — a coverage gap, not a metadata gap', 'episodes' => []],
             'never_researched' => ['label' => 'Never researched',  'hint' => 'Incomplete and never looked at',                   'episodes' => []],
             'conflict'         => ['label' => 'Conflicts',         'hint' => 'Sources disagree — a person should decide',        'episodes' => []],
             'needs_review'     => ['label' => 'Needs review',      'hint' => 'A decision was withheld pending review',           'episodes' => []],
             'failed'           => ['label' => 'Research failed',   'hint' => 'Could not be checked — usually transient',         'episodes' => []],
             'low_confidence'   => ['label' => 'Low confidence',    'hint' => 'Held on weak evidence; worth corroborating',       'episodes' => []],
-            'incomplete'       => ['label' => 'Incomplete',        'hint' => 'Researched, but the data simply is not published', 'episodes' => []],
+            'incomplete'       => ['label' => 'Insufficient Evidence', 'hint' => 'Researched, but the data simply is not published anywhere — not a failure', 'episodes' => []],
             'stale'            => ['label' => 'Stale',             'hint' => 'Not verified for a long time',                     'episodes' => []],
         ];
         if ($this->db === null) return $this->finishBuckets($buckets);
@@ -446,7 +452,92 @@ class RmResearchState
             $out['high_confidence'] = (int)$this->db->query(
                 "SELECT COUNT(*) FROM research_state WHERE confidence >= $low")->fetchColumn();
         } catch (Throwable $e) { }
+        // LOCKED (PR11 §6) — a real, separate concept from research_state:
+        // fields a person pinned via the episode editor so research never
+        // overwrites them. Additive key; degrades to 0 if the PR4 AI/
+        // diagnostics migration hasn't been run.
+        try {
+            $out['locked_episodes'] = (int)$this->db->query(
+                'SELECT COUNT(DISTINCT episode_number) FROM field_locks')->fetchColumn();
+        } catch (Throwable $e) { $out['locked_episodes'] = 0; }
         return $out;
+    }
+
+    /**
+     * ARCHIVE COVERAGE (PR11 §2A/§4/§15) — deliberately a SEPARATE axis
+     * from archiveHealth()'s metadata-gap numbers above. Answers "does
+     * this episode exist" and "what does live evidence say the archive
+     * should have", never "is its metadata fully enriched".
+     *
+     * Reuses RmLatestEpisode::detectDetailed() (PR9/PR10's evidence-based
+     * detector — aired vs upcoming vs disagreement vs insufficient
+     * evidence, never MAX+1) rather than the older vote-only
+     * RmDiscovery::latestEpisode(), and RmMissingData::gapsInNumbering()
+     * for numbering gaps below the archive max. Never invents a number:
+     * every field here is either a real count or null/an explicit
+     * "unknown" — the caller decides how to render that.
+     *
+     * DB-only by default (safe for an automatic page load, same rule
+     * admin/index.php and this page's own pageState() already follow —
+     * "never a live network probe on page load"). Pass a fresh
+     * RmLatestEpisode::detectDetailed() result via $detection to fold in
+     * live evidence (aired-vs-upcoming, missing episodes past the
+     * archive max) — reserved for the explicit "Detect Latest" action,
+     * never called automatically. Without one, latest_verified_aired
+     * falls back to the archive max (a real, already-verified-at-write-
+     * time fact, not a guess) and upcoming/decision report "not checked
+     * this session" rather than inventing a live answer.
+     *
+     * @return array{
+     *   stored_episodes:int, archive_latest:?int,
+     *   latest_verified_aired:?int, upcoming:?int,
+     *   decision:string, decision_note:string,
+     *   missing_count:int, missing_range:?string, missing_episodes:int[],
+     *   core:array
+     * }
+     */
+    public function archiveCoverage(int $missingCap = 200, ?array $detection = null): array
+    {
+        $stored = (int)($this->db?->query('SELECT COUNT(*) FROM episodes')->fetchColumn() ?? 0);
+        $dbMax  = $this->missing->maxEpisode();
+        $core   = $this->missing->coreCompleteness();
+
+        $det = $detection ?? [
+            'latest_aired' => $dbMax ?: null, 'upcoming' => [], 'missing_aired' => [],
+            'decision' => $dbMax > 0 ? 'NOT_CHECKED' : 'SOURCE_UNAVAILABLE',
+            'decision_note' => $dbMax > 0
+                ? 'Live sources have not been checked this session — showing the archive maximum. Click "Detect Latest" to verify.'
+                : 'The archive is empty and live sources have not been checked.',
+        ];
+
+        // Missing episode NUMBERS: gaps inside the stored range, plus any
+        // aired-and-confirmed episode past the archive max the detector
+        // already found evidence for (its 'missing_aired' list) — never
+        // just "db_max+1..detected latest" without that confirmation.
+        $missing = $this->missing->gapsInNumbering($missingCap);
+        foreach ((array)($det['missing_aired'] ?? []) as $m) $missing[] = (int)$m['episode'];
+        $missing = array_values(array_unique($missing));
+        sort($missing);
+
+        $range = null;
+        if ($missing) {
+            $range = (count($missing) === (max($missing) - min($missing) + 1))
+                ? 'EP' . min($missing) . '–EP' . max($missing)
+                : count($missing) . ' episode(s), EP' . min($missing) . '–EP' . max($missing);
+        }
+
+        return [
+            'stored_episodes'        => $stored,
+            'archive_latest'         => $dbMax ?: null,
+            'latest_verified_aired'  => $det['latest_aired'] ?? null,
+            'upcoming'               => !empty($det['upcoming']) ? (int)$det['upcoming'][0]['episode'] : null,
+            'decision'               => $det['decision'],
+            'decision_note'          => $det['decision_note'],
+            'missing_count'          => count($missing),
+            'missing_range'          => $range,
+            'missing_episodes'       => $missing,
+            'core'                   => $core,
+        ];
     }
 
     /**

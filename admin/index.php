@@ -26,12 +26,27 @@ if (isset($_GET['s'])) {
     $extra = [
         'health' => ['episodes'=>0,'completeness'=>0,'conflicts'=>0,'needs_review'=>0,
                       'stale'=>0,'low_confidence'=>0,'incomplete'=>0],
+        // Archive Coverage (episode existence + evidence-based latest) is
+        // a separate axis from 'health' above (metadata enrichment gaps)
+        // — PR11 §2. DB-only here, same as everything else on this
+        // endpoint: no live source probe on page load. Uses whatever
+        // RmLatestEpisode::detectDetailed() result Auto Sync's explicit
+        // "Detect Latest" last cached, or falls back to the archive
+        // maximum with an honest "not checked" note if nothing has run
+        // yet — never invents a number.
+        'coverage' => ['stored_episodes'=>0,'archive_latest'=>null,'latest_verified_aired'=>null,
+                        'upcoming'=>null,'decision'=>'NOT_CHECKED','decision_note'=>'',
+                        'missing_count'=>0,'missing_range'=>null,'core'=>['pct'=>0,'core_partial'=>0]],
         'last_run'      => null,
         'source_health' => ['healthy' => 0, 'total' => 0],
     ];
     try {
         require_once __DIR__ . '/../includes/scraping/bootstrap.php';
-        $extra['health'] = (new RmResearchState())->archiveHealth();
+        require_once __DIR__ . '/../includes/system.php';
+        $state = new RmResearchState();
+        $extra['health'] = $state->archiveHealth();
+        $cachedDetection = json_decode((string)stateGet('latest_detection', ''), true);
+        $extra['coverage'] = $state->archiveCoverage(200, is_array($cachedDetection) ? $cachedDetection : null);
 
         $run = RmScrapeRun::latest();
         if ($run) {
@@ -73,13 +88,23 @@ $logLines = array_filter(array_slice(explode("\n", trim($cronLog)), -6));
 <!-- Archive health — the four questions every admin page owes an answer to -->
 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.9rem;margin-bottom:1.6rem">
   <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.2rem">
-    <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28);margin-bottom:.5rem">Latest Aired vs Database</div>
-    <div style="display:flex;align-items:baseline;gap:.5rem">
-      <span id="st-lastep" style="font-size:1.5rem;font-weight:900;color:#FFD700">…</span>
-      <span style="font-size:.7rem;color:rgba(255,255,255,.3)">in the database</span>
+    <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.28);margin-bottom:.5rem">Archive Coverage</div>
+    <div style="display:flex;gap:1.1rem">
+      <div>
+        <div style="font-size:1.2rem;font-weight:900;color:#FFD700" id="st-archlatest">…</div>
+        <div style="font-size:.62rem;color:rgba(255,255,255,.3)">Archive latest</div>
+      </div>
+      <div>
+        <div style="font-size:1.2rem;font-weight:900" id="st-verifiedlatest">…</div>
+        <div style="font-size:.62rem;color:rgba(255,255,255,.3)">Latest verified aired</div>
+      </div>
+      <div>
+        <div style="font-size:1.2rem;font-weight:900" id="st-missingeps">…</div>
+        <div style="font-size:.62rem;color:rgba(255,255,255,.3)">Missing episodes</div>
+      </div>
     </div>
     <div style="font-size:.72rem;color:rgba(255,255,255,.4);margin-top:.4rem">
-      To verify against live sources: <a href="<?= bp() ?>/admin/diagnostics.php" style="color:#29ABE2">Diagnostics → Source Health</a>
+      <a href="<?= bp() ?>/admin/auto_sync.php" style="color:#29ABE2">Auto Sync → Detect Latest</a> to verify against live sources
     </div>
   </div>
   <div style="background:#0e1420;border:1px solid rgba(41,171,226,.1);border-radius:13px;padding:1.2rem">
@@ -178,7 +203,13 @@ fetch('index.php?s=1')
   .then(r=>r.json()).then(d=>{
     var c=(id,v,col)=>{var e=document.getElementById(id);if(e){e.textContent=v;e.style.color=col||'inherit'}};
     c('st-total', d.total.toLocaleString(), '#FFD700');
-    c('st-miss',  d.missing,    d.missing>0?'#fca5a5':'#86efac');
+    // Archive Coverage's own evidence-aware missing count when a live
+    // detection has been cached (Auto Sync → Detect Latest); falls back
+    // to the plain numbering-range count otherwise — either way, this
+    // is coverage (does the episode exist), never metadata enrichment.
+    var cov = d.coverage || {};
+    var missingCount = cov.missing_count ?? d.missing;
+    c('st-miss',  missingCount, missingCount>0?'#fca5a5':'#86efac');
     c('st-syn',   d.no_synopsis,d.no_synopsis>0?'#fcd34d':'#86efac');
     c('st-thumb', d.thumb_missing,d.thumb_missing>0?'#fcd34d':'#86efac');
     c('st-pct',   d.pct+'%',   d.pct>=100?'#86efac':'#29ABE2');
@@ -188,7 +219,11 @@ fetch('index.php?s=1')
 
     var h = d.health || {};
     c('st-review', h.needs_review ?? 0, (h.needs_review ?? 0) > 0 ? '#fca5a5' : '#86efac');
-    c('st-lastep', 'EP' + String(d.last_ep).padStart(3,'0'));
+    c('st-archlatest', cov.archive_latest ? 'EP'+String(cov.archive_latest).padStart(3,'0') : '—', '#FFD700');
+    if (cov.latest_verified_aired) c('st-verifiedlatest', 'EP'+String(cov.latest_verified_aired).padStart(3,'0'), '#86efac');
+    else if (cov.decision === 'SOURCE_DISAGREEMENT') c('st-verifiedlatest', 'Disagreement', '#fcd34d');
+    else c('st-verifiedlatest', 'Not checked', 'rgba(255,255,255,.3)');
+    c('st-missingeps', missingCount, missingCount>0?'#fcd34d':'#86efac');
 
     var lr = d.last_run;
     var lrEl = document.getElementById('st-lastrun'), lrDetail = document.getElementById('st-lastrun-detail');

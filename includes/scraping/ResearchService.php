@@ -373,10 +373,39 @@ class RmResearchService
         };
     }
 
+    /**
+     * Machine-readable failure category (PR11 §10) — "research failed"
+     * must be distinguishable from WHY: a source blocking us is not the
+     * same problem as a genuine network outage, and neither is the same
+     * as "no source could be reached at all". Stored as a bracketed
+     * prefix on the existing free-text last_reason column rather than a
+     * new schema column — additive, greppable, no migration needed.
+     */
+    public static function failureReasonCode(array $meta): string
+    {
+        $byStatus = [];
+        foreach ($meta as $m) {
+            $s = RmEvidenceSet::sourceStatusFor((string)($m['status'] ?? ''));
+            $byStatus[$s] = ($byStatus[$s] ?? 0) + 1;
+        }
+        $contacted = array_sum($byStatus) - ($byStatus['NOT_APPLICABLE'] ?? 0);
+        if ($contacted === 0) return 'NO_SOURCES_AVAILABLE';
+        $blocked = ($byStatus['ACCESS_RESTRICTED'] ?? 0) + ($byStatus['RATE_LIMITED'] ?? 0);
+        $network = $byStatus['TEMPORARY_ERROR'] ?? 0;
+        $parser  = ($byStatus['STRUCTURE_CHANGED'] ?? 0) + ($byStatus['PARSER_ERROR'] ?? 0) + ($byStatus['JAVASCRIPT_REQUIRED'] ?? 0);
+        return match (true) {
+            $blocked > 0 && $blocked >= $network && $blocked >= $parser => 'SOURCE_BLOCKED',
+            $network > 0 && $network >= $parser                        => 'NETWORK_FAILURE',
+            $parser > 0                                                => 'PARSER_FAILURE',
+            default                                                    => 'UNKNOWN_FAILURE',
+        };
+    }
+
     private function reasonFor(string $outcome, array $result, array $decisions, array $meta, array $applied): string
     {
         if ($outcome === 'failed') {
-            return (string)($result['reason'] ?? 'No source could be reached, so the episode could not be checked');
+            $reason = (string)($result['reason'] ?? 'No source could be reached, so the episode could not be checked');
+            return '[' . self::failureReasonCode($meta) . '] ' . $reason;
         }
         if ($outcome === 'needs_review') {
             $fields = [];
@@ -513,7 +542,7 @@ class RmResearchService
                     'fields'  => $this->fieldsForGaps($fields),
                 ] + $opt);
             } catch (Throwable $e) {
-                $r = ['outcome' => 'failed', 'reason' => 'Adapter error: ' . $e->getMessage(),
+                $r = ['outcome' => 'failed', 'reason' => '[ADAPTER_ERROR] Adapter error: ' . $e->getMessage(),
                       'confidence' => null, 'activity' => [], 'episode' => $ep];
                 if (!$run->isDryRun()) {
                     $this->state->record($ep, RmResearchState::FAILED,
