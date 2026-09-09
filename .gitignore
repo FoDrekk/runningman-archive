@@ -3,3 +3,7 @@
 # is where a TMDB key belongs. Never commit it.
 # Start from config/scraping.local.example.php.
 config/scraping.local.php
+
+# Database backups (Admin -> System Health -> "Backup Now", or before a
+# bulk run) — full data dumps, never committed.
+/backups/

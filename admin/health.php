@@ -53,6 +53,23 @@ if (isset($_GET['a']) && $_GET['a'] === 'integrity') {
     exit;
 }
 
+// AJAX: database backup before a bulk change (section 24). Read-only
+// against application data — it only ever creates a new dump file.
+if (isset($_GET['a']) && $_GET['a'] === 'backup') {
+    header('Content-Type: application/json');
+    if (ob_get_level() > 0) ob_clean();
+    require_once __DIR__ . '/../includes/scraping/bootstrap.php';
+    $label = trim((string)($_GET['label'] ?? 'manual'));
+    echo json_encode(RmDatabaseBackup::create($label ?: 'manual'));
+    exit;
+}
+if (isset($_GET['a']) && $_GET['a'] === 'backups') {
+    header('Content-Type: application/json');
+    require_once __DIR__ . '/../includes/scraping/bootstrap.php';
+    echo json_encode(['ok' => true, 'available' => RmDatabaseBackup::available(), 'backups' => RmDatabaseBackup::list()]);
+    exit;
+}
+
 // A ?a= request that reached this point matched no handler above.
 // Rendering the page would hand a JSON caller an HTML document.
 rmJsonRejectUnknownAction();
@@ -136,6 +153,21 @@ $failures = getRecentFailures(7, 20);
     </tbody>
   </table>
   <?php endif; ?>
+</div>
+
+<!-- Database backup -->
+<div class="ap">
+  <div class="sh">Database Backup</div>
+  <p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.9rem">
+    A plain SQL dump, taken before a bulk operation (Fill Missing, a large AI generation pass, a big import)
+    so there is something to restore from if it needs undoing. Stored outside the web-accessible paths.
+  </p>
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.8rem">
+    <input type="text" id="backupLabel" placeholder="label (e.g. run ref)" style="width:200px;padding:.4rem .7rem;background:#141c2c;border:1px solid rgba(41,171,226,.14);border-radius:7px;color:#eef2f8;font-size:.82rem;outline:none">
+    <button class="btn btn-sm" onclick="runBackup()" id="btnBackup">💾 Backup Now</button>
+  </div>
+  <div id="backupResult" style="margin-bottom:.8rem"></div>
+  <div id="backupList" style="font-size:.78rem"></div>
 </div>
 
 <!-- Data integrity check -->
@@ -227,6 +259,34 @@ async function runIntegrity(){
   }catch(e){ out.innerHTML='<div class="alert alert-err">Request failed: '+e.message+'</div>'; }
   btn.disabled=false; btn.innerHTML='🔍 Run Data Integrity Check';
 }
-window.addEventListener('load', runCheck);
+async function runBackup(){
+  var btn=document.getElementById('btnBackup');
+  var label=document.getElementById('backupLabel').value.trim();
+  btn.disabled=true; btn.innerHTML='<span class="spin"></span> Backing up…';
+  try{
+    var r=await fetch(BP+'/admin/health.php?a=backup&label='+encodeURIComponent(label||'manual'));
+    var d=await r.json();
+    var out=document.getElementById('backupResult');
+    out.innerHTML = d.ok
+      ? '<div class="alert alert-ok">✓ Backup created: '+d.filename+' ('+(d.size/1024/1024).toFixed(1)+' MB)</div>'
+      : '<div class="alert alert-err">✗ '+d.reason+'</div>';
+    loadBackups();
+  }catch(e){ document.getElementById('backupResult').innerHTML='<div class="alert alert-err">Request failed: '+e.message+'</div>'; }
+  btn.disabled=false; btn.innerHTML='💾 Backup Now';
+}
+async function loadBackups(){
+  var out=document.getElementById('backupList');
+  try{
+    var r=await fetch(BP+'/admin/health.php?a=backups');
+    var d=await r.json();
+    if(!d.available){ out.innerHTML='<span style="color:rgba(255,255,255,.3)">mysqldump is not available on this host — backups cannot be taken here.</span>'; return; }
+    if(!d.backups.length){ out.innerHTML='<span style="color:rgba(255,255,255,.3)">No backups yet.</span>'; return; }
+    out.innerHTML = d.backups.map(function(b){
+      return '<div style="display:flex;justify-content:space-between;padding:.3rem 0;border-bottom:1px solid rgba(41,171,226,.05)">'
+        +'<span>'+b.filename+'</span><span style="color:rgba(255,255,255,.3)">'+(b.size/1024/1024).toFixed(1)+' MB · '+b.created_at.slice(0,16).replace('T',' ')+'</span></div>';
+    }).join('');
+  }catch(e){ out.innerHTML='<span style="color:#fca5a5">Failed to load: '+e.message+'</span>'; }
+}
+window.addEventListener('load', function(){ runCheck(); loadBackups(); });
 </script>
 </body></html>
