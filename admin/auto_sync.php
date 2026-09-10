@@ -182,7 +182,16 @@ if ($action === 'run_start') {
     ];
     if ($scope === 'range')  { $opt['from'] = (int)($_GET['from'] ?? 1); $opt['to'] = (int)($_GET['to'] ?? 1); }
     if ($scope === 'single') { $opt['episode'] = (int)($_GET['ep'] ?? 0); }
-    if ($scope === 'new')    { $opt['latest'] = (int)($_GET['latest'] ?? 0); }
+    if ($scope === 'new') {
+        // PR13: never a client-supplied number — that is exactly the
+        // "assume the next number aired" pattern this scope exists to
+        // avoid. The server reads its OWN most recent evidence (the
+        // detect_latest action the page always calls first caches this
+        // under the same key archiveCoverage() reads) and queues only the
+        // specific episodes that evidence actually confirmed aired.
+        $cached = json_decode((string)stateGet('latest_detection', ''), true);
+        $opt['missing_aired'] = is_array($cached) ? (array)($cached['missing_aired'] ?? []) : [];
+    }
 
     $svc = new RmResearchService($db);
     $run = $svc->startRun($scope, $opt);
@@ -800,10 +809,11 @@ async function startRun(scope, extra){
     limit: document.getElementById('sLimit') ? document.getElementById('sLimit').value : 50,
   }, extra||{});
   if (scope === 'range'){ p.from = document.getElementById('sFrom').value; p.to = document.getElementById('sTo').value; }
-  // Confirmed-aired ceiling only — never the raw "sources mention this
-  // number" value, so an announced-but-unaired episode is never queued
-  // as if it had already aired (PR11 §6/§9).
-  if (scope === 'new'){ const d = await api('detect_latest'); p.latest = d.latest_verified_aired || d.archive_latest || 0; }
+  // Refresh evidence before the server builds the queue — it reads its
+  // own cache of this, not a number from here (PR11 §6/§9, PR13): an
+  // announced-but-unaired episode is never queued as if it had already
+  // aired, and no episode is queued just for being numerically next.
+  if (scope === 'new'){ await api('detect_latest'); }
 
   const r = await api('run_start', p);
   if (!r.ok){ toast(r.error || 'Could not start the run'); await refreshState(); return; }

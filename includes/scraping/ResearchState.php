@@ -396,7 +396,19 @@ class RmResearchState
         return $reasons ?: ['Requested explicitly'];
     }
 
-    /** Priority band, P1 (most urgent) … P6. Drives queue ordering. */
+    /**
+     * Priority band, P1 (most urgent) … P8. Drives queue ordering.
+     *
+     * PR13 §5 order — confirmed missing aired, incomplete recently aired,
+     * needs review, failed-after-cooldown, stale — mapped onto bands 1-3
+     * PR11 already established (and its tests already lock in): a new/
+     * missing episode is always P1, a source conflict P2 (more actionable
+     * than a plain review, since it names a specific disagreement), a
+     * critical-field gap (title/air_date — "incomplete recently aired")
+     * P3. FAILED and REVIEW get their own explicit bands here rather than
+     * falling through into low-confidence/stale, which is the only actual
+     * gap PR13 found in this ordering.
+     */
     public function priority(int $epNum, ?array $state = null, ?array $gaps = null): int
     {
         $values = $this->missing->currentValues($epNum);
@@ -407,10 +419,18 @@ class RmResearchState
 
         if ($status === self::CONFLICT) return 2;
         if (array_intersect($gaps, ['title', 'air_date'])) return 3;   // critical fields
+        // A failed attempt is worth retrying once its cool-down has
+        // passed — isEligible() already gates WHEN, this only ranks it
+        // once it's back in play. REVIEW is normally excluded from the
+        // auto-built queue entirely (isEligible() returns false) and only
+        // reaches here via an explicit/forced scope, but still deserves a
+        // sensible rank rather than falling through to "stale".
+        if ($status === self::FAILED) return 4;
+        if ($status === self::REVIEW) return 5;
         if (isset($state['confidence']) && $state['confidence'] !== null
-            && (int)$state['confidence'] < (int)rmScrapeConfig('research.low_confidence_below', 75)) return 4;
-        if ($this->isStale($epNum, $state)) return 5;
-        return 6;
+            && (int)$state['confidence'] < (int)rmScrapeConfig('research.low_confidence_below', 75)) return 6;
+        if ($this->isStale($epNum, $state)) return 7;
+        return 8;
     }
 
     /**
@@ -551,7 +571,6 @@ class RmResearchState
     {
         $limit  = max(1, (int)($opt['limit'] ?? 200));
         $force  = !empty($opt['force']);       // ignore cool-downs (explicit retry / deep research)
-        $latest = (int)($opt['latest'] ?? 0);
         $out    = [];
 
         $add = function (int $ep, array $gaps = []) use (&$out, $force) {
@@ -594,11 +613,24 @@ class RmResearchState
                 break;
 
             case 'new':
+                // PR13: never a bare "$dbMax+1..$latest" range — that queues
+                // a number because it is numerically next, not because any
+                // evidence says it exists. $latest alone is now ignored here.
+                // 'missing_aired' must be the SPECIFIC episode numbers
+                // RmLatestEpisode::detectDetailed() already independently
+                // confirmed (resolved a real air_date for, through the full
+                // collect+resolve pipeline) — each one individually
+                // evidence-backed, not interpolated between two numbers.
                 $dbMax = $this->missing->maxEpisode();
-                for ($n = $dbMax + 1; $n <= $latest && count($out) < $limit; $n++) {
-                    $out[$n] = ['episode' => $n, 'priority' => 1,
-                                'reasons' => ['New episode — detected upstream, not in the archive yet'],
-                                'fields'  => []];
+                foreach ((array)($opt['missing_aired'] ?? []) as $entry) {
+                    $n = is_array($entry) ? (int)($entry['episode'] ?? 0) : (int)$entry;
+                    if ($n <= $dbMax || count($out) >= $limit) continue;
+                    $airDate = is_array($entry) ? ($entry['air_date'] ?? null) : null;
+                    $sources = is_array($entry) ? (array)($entry['sources'] ?? []) : [];
+                    $reason  = 'Confirmed aired by live evidence'
+                             . ($airDate ? " ($airDate)" : '')
+                             . ($sources ? ' — ' . implode(', ', $sources) : '');
+                    $out[$n] = ['episode' => $n, 'priority' => 1, 'reasons' => [$reason], 'fields' => []];
                 }
                 foreach ($this->missing->gapsInNumbering($limit) as $n) {
                     if (count($out) >= $limit) break;
