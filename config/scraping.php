@@ -155,6 +155,31 @@ function rmScrapeDefaultConfig(): array {
                 // UPDATE canonical episode metadata. See Decision.php.
                 'verification_only' => true,
             ],
+            // ── PR12 additions ─────────────────────────────────────
+            // Both start at tier 1 and LAST in every field_priority list
+            // they appear in — see FandomScraper.php / TvMazeScraper.php
+            // for why: neither has a production track record yet, so
+            // neither is allowed to outrank a source that does.
+            'fandom' => [
+                'label'   => 'Running Man Wiki (Fandom)',
+                'tier'    => 1,
+                'class'   => 'secondary',
+                'enabled' => true,
+                'delay_ms'=> 900,
+                'base'    => 'https://runningman.fandom.com/',
+            ],
+            'tvmaze' => [
+                'label'   => 'TVmaze',
+                'tier'    => 1,
+                'class'   => 'secondary',
+                // No API key needed — see TvMazeScraper.php for why this
+                // is the one zero-configuration independent air-date/
+                // title witness in the registry.
+                'enabled' => true,
+                'delay_ms'=> 500,
+                'base'    => 'https://api.tvmaze.com/',
+                'show_id' => 3479,      // "Running Man" on TVmaze
+            ],
         ],
 
         // ── Publisher lineage ─────────────────────────────────────
@@ -182,15 +207,15 @@ function rmScrapeDefaultConfig(): array {
         // diagnostics/verification only (see sources.imdb.verification_only)
         // and must never win a field.
         'field_priority' => [
-            'title'        => ['wikipedia','sbs','myrm','tvdb','kowiki','myrunningman','kshow123'],
+            'title'        => ['wikipedia','sbs','myrm','tvdb','kowiki','myrunningman','kshow123','tvmaze','fandom'],
             'title_ko'     => ['sbs','kowiki'],
-            'air_date'     => ['sbs','wikipedia','tvdb','kowiki','myrm','myrunningman'],
+            'air_date'     => ['sbs','wikipedia','tvdb','kowiki','myrm','myrunningman','tvmaze','fandom'],
             'synopsis'     => ['wikipedia','myrunningman','myrm','sbs','kowiki'],
-            'guests'       => ['wikipedia','kowiki','sbs','myrm','myrunningman'],
-            'mission'      => ['wikipedia','myrunningman','kowiki'],
+            'guests'       => ['wikipedia','kowiki','sbs','myrm','myrunningman','fandom'],
+            'mission'      => ['wikipedia','myrunningman','kowiki','fandom'],
             'teams'        => ['wikipedia'],
             'results'      => ['wikipedia'],
-            'location'     => ['myrunningman','wikipedia','sbs','kowiki'],
+            'location'     => ['myrunningman','wikipedia','sbs','kowiki','fandom'],
             'theme'        => ['myrunningman','wikipedia'],
             'tags'         => ['myrunningman','wikipedia'],
             'special_notes'=> ['wikipedia','sbs','myrunningman'],

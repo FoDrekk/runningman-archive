@@ -204,6 +204,10 @@ CREATE TABLE IF NOT EXISTS research_discovery (
 INSERT IGNORE INTO source_reputation (source_name, field_name, reputation) VALUES
     ('sbs','*',75), ('wikipedia','*',75), ('kowiki','*',70),
     ('myrunningman','*',70), ('myrm','*',60),
-    ('tvdb','*',65), ('kshow123','*',55), ('imdb','*',60);
+    ('tvdb','*',65), ('kshow123','*',55), ('imdb','*',60),
+    -- PR12: unproven in production — start below every existing source
+    -- until each has an actual track record (see config/scraping.php
+    -- sources.fandom/sources.tvmaze, tier=>1).
+    ('fandom','*',50), ('tvmaze','*',50);
 
 SELECT 'Research engine tables created' AS status;

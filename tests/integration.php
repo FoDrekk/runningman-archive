@@ -546,7 +546,16 @@ for ($n = $lo; $n <= $hi; $n++) {
     // genuinely without this episode.
     $cache->set('http:asianwiki:ep:' . md5("https://asianwiki.com/Running_Man_Episode_$n"),
         '<html><body>There is currently no text in this page</body></html>' . str_repeat(' ', 500), 300, 'page');
+    // Fandom (PR12): reachable, resolves to the right episode, but the
+    // article has no portable-infobox yet — a real, reachable-but-warned
+    // response, same bucket as myrunningman/myrm above.
+    $cache->set("http:fandom:ep:$n",
+        json_encode(['parse' => ['title' => "Episode/$n", 'text' => ['*' => '<p>Stub article.</p>']]])
+        . str_repeat(' ', 700), 300, 'page');
 }
+// TVmaze (PR12): reachable episode index, but it covers none of these —
+// same "reachable, genuinely nothing here" shape as AsianWiki/IMDb above.
+$cache->set('tvmaze:index', [1 => ['name' => 'Episode 1', 'airdate' => '2010-07-11']], 3600, 'api');
 // IMDb answers with a season listing that does not include these episodes.
 $cache->set('http:imdb:season:' . md5('https://www.imdb.com/title/tt1587289/episodes/?season=' . (rmYear($lo) - 2009)),
     '<html><body><script type="application/ld+json">{"@type":"TVSeries","episode":[]}</script></body></html>'
