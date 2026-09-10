@@ -152,11 +152,12 @@ $logLines = array_filter(array_slice(explode("\n", trim($cronLog)), -6));
 
 <!-- Quick Actions -->
 <div style="font-size:.68rem;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:rgba(41,171,226,.4);margin-bottom:.9rem">Quick Actions</div>
-<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:.75rem;margin-bottom:1.75rem">
+<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:.75rem;margin-bottom:1.75rem">
   <?php foreach ([
     ['⚡','Research Latest', 'scraper.php',              true],
     ['🧩','Fill Missing',    'scraper.php',              true],
     ['🚩','Review Issues',   'scraper.php#needs-review', false],
+    ['📋','Archive Health',  'archive_health.php',       false],
     ['🩺','Diagnostics',     'diagnostics.php',          false],
     ['📥','Import Excel/CSV','import.php',               false],
   ] as [$ic,$lbl,$url,$pri]): ?>

@@ -398,6 +398,18 @@ function rmScrapeDefaultConfig(): array {
             'min_score'              => 0.40,  // RmThumbnailEngine::scoreCandidate() floor — see that method
             'near_duplicate_distance'=> 8,      // dHash Hamming distance (of 64 bits) below which two images count as visually near-identical
         ],
+
+        // ── Archive Health (PR16) ──────────────────────────────────
+        // Bounds only — the scan itself is always read-only. Every cap
+        // here exists so an explicit "run the health scan" click stays
+        // fast and predictable on a large archive; it never limits what
+        // a health scan is ALLOWED to find, only how much of the archive
+        // one call inspects in detail before reporting "capped".
+        'archive_health' => [
+            'thumbnail_scan_limit'  => 500,   // episodes classify()'d per scan (each is a local disk read)
+            'provenance_scan_limit' => 500,   // ai_generation_log / research_decisions rows inspected per scan
+            'issue_limit'           => 500,   // total issues returned per scan (still bounded, still explainable)
+        ],
     ];
 }
 

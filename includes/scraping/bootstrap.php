@@ -63,6 +63,7 @@ require_once __DIR__ . '/AiSynopsis.php';
 require_once __DIR__ . '/DiagnosticReport.php';
 require_once __DIR__ . '/Backup.php';
 require_once __DIR__ . '/ResearchService.php';
+require_once __DIR__ . '/ArchiveHealth.php';
 
 /** Shared engine instance for page code. */
 function rmEngine(): RmScrapingEngine {
