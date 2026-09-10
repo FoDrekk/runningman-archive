@@ -187,6 +187,27 @@ class RmAiSynopsisService
         return $result;
     }
 
+    /**
+     * The generation log's `applied` column is written FALSE by log()
+     * every time, because consider() decides GENERATE/REQUEST_REVIEW
+     * before the caller has attempted the actual database write —
+     * whether it lands still depends on RmDecision::isSafe() and any
+     * anomaly veto downstream. The caller marks the most recent log row
+     * true only once that write has genuinely happened, so the audit
+     * trail (Section 6) reflects reality rather than an assumption.
+     */
+    public function markApplied(int $epNum, ?int $runId): void
+    {
+        if ($this->db === null || !self::tableExists($this->db)) return;
+        try {
+            $this->db->prepare(
+                'UPDATE ai_generation_log SET applied = 1
+                   WHERE episode_number = ? AND field_name = ? AND (run_id <=> ?)
+                   ORDER BY log_id DESC LIMIT 1'
+            )->execute([$epNum, 'synopsis', $runId]);
+        } catch (Throwable $e) { /* logging must never break research */ }
+    }
+
     private static function tableExists(PDO $db): bool
     {
         static $exists = null;

@@ -117,8 +117,16 @@ class RmAiDecisionProvider implements RmDecisionProvider
         $confidence = max(0, min(100, (int)($parsed['confidence'] ?? 0)));
         $chosenSource = is_string($parsed['chosen_source'] ?? null) ? $parsed['chosen_source'] : null;
 
+        // An AI-resolved conflict may only become an auto-write UPDATE in
+        // 'auto' mode, and only past the stricter 'high' bar — exactly the
+        // same mode/threshold gate RmAiSynopsisService applies to GENERATE.
+        // In 'review' mode (the default) a confident resolution still goes
+        // to REVIEW: a person confirms it before it ever reaches the DB.
+        $canAutoWrite = $this->client->mode() === 'auto'
+            && $confidence >= (int)($thresholds['high'] ?? 90);
+
         $decision = match ((string)$parsed['decision']) {
-            'USE_SOURCE_DATA' => $confidence >= (int)($thresholds['review'] ?? 70) ? 'UPDATE' : 'REVIEW',
+            'USE_SOURCE_DATA' => $canAutoWrite ? 'UPDATE' : 'REVIEW',
             'NO_USABLE_DATA'  => 'UNKNOWN',
             default           => 'REVIEW',
         };

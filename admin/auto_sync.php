@@ -121,6 +121,7 @@ function pageState(PDO $db): array
         'sources'   => $sources,
         'reviews'   => count(RmDecisionEngine::openReviews($db, 200)),
         'modes'     => RmResearchService::modes(),
+        'ai'        => ['mode' => (new RmAiClient())->mode(), 'available' => (new RmAiClient())->available()],
     ];
 }
 
@@ -294,6 +295,7 @@ if ($action === 'preview') {
         'dry_run'    => true,
         'all_fields' => true,
         'bypass_cache' => !empty($_GET['fresh']),
+        'regenerate_synopsis' => !empty($_GET['regen']),
     ]);
     unset($r['evidence'], $r['plan']);   // objects, not JSON payload
     asJson(['ok' => true] + $r);
@@ -306,6 +308,7 @@ if ($action === 'apply_safe') {
         'mode'       => (string)($_GET['mode'] ?? rmScrapeConfig('research.default_mode', 'balanced')),
         'all_fields' => true,
         'bypass_cache' => !empty($_GET['fresh']),
+        'regenerate_synopsis' => !empty($_GET['regen']),
     ]);
     unset($r['evidence'], $r['plan']);
     logActivity('sync', $ep, $r['outcome'] === 'failed' ? 'failed' : 'success',
@@ -329,8 +332,7 @@ if ($action === 'reviews') {
 if ($action === 'review_resolve') {
     $id  = (int)($_GET['id'] ?? 0);
     $out = (string)($_GET['outcome'] ?? '');
-    $ok  = RmDecisionEngine::resolveReview($db, $id, $out);
-    asJson(['ok' => $ok, 'error' => $ok ? null : 'Unknown decision or outcome.']);
+    asJson(RmDecisionEngine::resolveReview($db, $id, $out));
 }
 
 // ── Backward compatibility ────────────────────────────────────
@@ -415,6 +417,7 @@ $archive    = $S['archive'];
 $current    = $S['current'];
 $last       = $S['last'];
 $attention  = $S['attention'];
+$ai         = $S['ai'];
 $modes      = $S['modes'];
 $defaultMode = (string)rmScrapeConfig('research.default_mode', 'balanced');
 $recentLog  = getRecentActivity(12, 'sync');
@@ -538,6 +541,11 @@ function toneColour(string $tone): string
   <div class="rc-stat"><b><?= (int)$archive['stale'] ?></b><span>Stale</span></div>
   <div class="rc-stat"><b><?= (int)$archive['never_researched'] ?></b><span>Never researched</span></div>
   <div class="rc-stat"><b><?= (int)($archive['locked_episodes'] ?? 0) ?></b><span>Locked fields<br><span style="text-transform:none;letter-spacing:0">(manually pinned)</span></span></div>
+  <div class="rc-stat" id="aiStat" title="Set in config/scraping.php (ai.mode) or config/scraping.local.php — disabled, review or auto">
+    <b style="color:<?= !$ai['available'] ? 'rgba(255,255,255,.4)' : ($ai['mode'] === 'auto' ? '#4ade80' : '#fcd34d') ?>">
+      <?= $ai['available'] ? htmlspecialchars(ucfirst($ai['mode'])) : 'Off' ?>
+    </b><span>AI synopsis<br><span style="text-transform:none;letter-spacing:0"><?= $ai['available'] ? 'drafts held for review unless auto-mode' : 'no key configured' ?></span></span>
+  </div>
 </div>
 
 <!-- ══ 2. CURRENT RUN ═════════════════════════════════════════ -->
@@ -977,26 +985,28 @@ async function inspectEpisode(ep){
 }
 
 // ── Change preview: never write before showing the diff ──────
-async function previewEpisode(ep){
+async function previewEpisode(ep, regen){
   ep = ep || parseInt(document.getElementById('sEp').value, 10);
-  toast('Researching ' + pad(ep) + ' without writing…');
+  regen = regen ? 1 : 0;
+  toast(regen ? 'Asking AI to redraft the synopsis for ' + pad(ep) + '…' : 'Researching ' + pad(ep) + ' without writing…');
   const fresh = document.getElementById('sFresh') && document.getElementById('sFresh').checked ? 1 : 0;
-  const r = await api('preview', {ep: ep, mode: mode(), fresh: fresh});
+  const r = await api('preview', {ep: ep, mode: mode(), fresh: fresh, regen: regen});
   if (!r.ok){ toast('Preview failed'); return; }
-  renderPreview(ep, r, true);
+  renderPreview(ep, r, true, regen);
 }
 
-async function applySafe(ep){
+async function applySafe(ep, regen){
   ep = ep || parseInt(document.getElementById('sEp').value, 10);
+  regen = regen ? 1 : 0;
   const fresh = document.getElementById('sFresh') && document.getElementById('sFresh').checked ? 1 : 0;
-  const r = await api('apply_safe', {ep: ep, mode: mode(), fresh: fresh});
+  const r = await api('apply_safe', {ep: ep, mode: mode(), fresh: fresh, regen: regen});
   if (!r.ok){ toast('Failed'); return; }
-  renderPreview(ep, r, false);
+  renderPreview(ep, r, false, regen);
   toast(pad(ep) + ': ' + r.reason);
   refreshState();
 }
 
-function renderPreview(ep, r, isDry){
+function renderPreview(ep, r, isDry, regen){
   let html = '<div class="sc-meta" style="margin-bottom:.6rem">' +
     '<b>' + esc(r.outcome.replace(/_/g,' ').toUpperCase()) + '</b>' + (isDry ? ' · DRY RUN, nothing was written' : '') +
     (r.confidence != null ? ' · confidence ' + r.confidence + '%' : '') + ' · ' + (r.ms|0) + 'ms</div>' +
@@ -1026,8 +1036,9 @@ function renderPreview(ep, r, isDry){
   if (r.withheld && r.withheld.length)
     html += '<div class="sc-meta" style="margin-top:.5rem;color:#fcd34d">Withheld from the automatic write: ' + r.withheld.map(esc).join(', ') + '</div>';
 
-  if (isDry) html += '<div style="margin-top:.9rem;display:flex;gap:.5rem">' +
-    '<button class="btn btn-sm" onclick="applySafe(' + ep + ')">Apply all safe changes</button>' +
+  if (isDry) html += '<div style="margin-top:.9rem;display:flex;gap:.5rem;flex-wrap:wrap">' +
+    '<button class="btn btn-sm" onclick="applySafe(' + ep + ',' + (regen ? 1 : 0) + ')">Apply all safe changes</button>' +
+    '<button class="btn btn-sm btn-dark" onclick="previewEpisode(' + ep + ',1)" title="Ask AI to draft a new synopsis even though a usable one already exists">Regenerate synopsis</button>' +
     '<button class="btn btn-sm btn-ghost" onclick="document.getElementById(\'detailPanel\').style.display=\'none\'">Cancel</button></div>';
 
   document.getElementById('detailTitle').textContent = pad(ep) + (isDry ? ' — proposed changes' : ' — applied');
@@ -1064,7 +1075,7 @@ async function loadReviews(){
 async function resolveReview(id, outcome){
   const r = await api('review_resolve', {id: id, outcome: outcome});
   if (!r.ok){ toast(r.error || 'Could not record that'); return; }
-  toast('Recorded — the evidence is kept either way');
+  toast(r.note || 'Recorded — the evidence is kept either way');
   loadReviews(); refreshState();
 }
 
