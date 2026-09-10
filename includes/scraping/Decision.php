@@ -410,18 +410,90 @@ class RmDecisionEngine
     }
 
     /**
+     * The scalar fields a review "Accept" can safely write on its own —
+     * exactly RmScrapingEngine::updateEpisode()'s column map. Fields that
+     * need identity resolution (guests, location) or byte handling
+     * (thumbnail) are deliberately excluded: research_decisions stores
+     * chosen_value as flattened text, which is fine for a headline or a
+     * sentence but would corrupt a guest list or a location lookup, so
+     * those stay REVIEW-recorded only and are edited by hand.
+     */
+    private const ACCEPTABLE_FIELDS = [
+        'title' => 'title', 'air_date' => 'air_date', 'synopsis' => 'synopsis',
+        'mission' => 'main_mission', 'special_notes' => 'special_notes',
+        'teams' => 'teams', 'results' => 'results',
+    ];
+
+    /**
+     * Write an accepted decision's chosen value to the episode — the
+     * "safe write" half of the review inbox. Never touches a locked
+     * field, and a field type this cannot write safely (guests,
+     * location, thumbnail) is reported, not silently dropped.
+     */
+    private static function applyAccepted(PDO $db, array $row): array
+    {
+        $epNum = (int)$row['episode_number'];
+        $field = (string)$row['field_name'];
+        $value = $row['chosen_value'];
+
+        if ($value === null || $value === '') {
+            return ['written' => false, 'note' => 'Nothing to write — the accepted value is empty.'];
+        }
+        if (RmFieldLock::isLocked($db, $epNum, $field)) {
+            return ['written' => false, 'note' => "EP$epNum $field is locked — accepting the review did not overwrite it."];
+        }
+        $col = self::ACCEPTABLE_FIELDS[$field] ?? null;
+        if ($col === null) {
+            return ['written' => false,
+                'note' => "Recorded, but '$field' needs identity resolution and was not auto-written — edit it directly on the episode."];
+        }
+        try {
+            $exists = $db->prepare('SELECT 1 FROM episodes WHERE episode_number = ?');
+            $exists->execute([$epNum]);
+            // rowCount() after UPDATE is 0 both when nothing matched and
+            // when the row matched but already held this exact value — a
+            // real MySQL/MariaDB quirk, not a failure — so existence is
+            // checked separately rather than inferred from the affected count.
+            if (!$exists->fetchColumn()) return ['written' => false, 'note' => "Could not write $field — no matching episode."];
+            $db->prepare("UPDATE episodes SET `$col` = ? WHERE episode_number = ?")->execute([$value, $epNum]);
+        } catch (Throwable $e) {
+            return ['written' => false, 'note' => "Could not write $field: the column may not exist in this schema."];
+        }
+        try {
+            (new RmProvenance($db))->recordField($epNum, $field,
+                ['value' => $value, 'source' => 'admin_review', 'confidence' => (int)($row['confidence'] ?? 0), 'conflicts' => []]);
+        } catch (Throwable $e) { /* provenance must never block the write it describes */ }
+        return ['written' => true, 'note' => "EP$epNum $field updated from the accepted review."];
+    }
+
+    /**
      * Close a review. Ignoring is a decision about what to do next, not
      * an instruction to forget: the row and its evidence stay exactly
-     * where they are.
+     * where they are. Accepting also performs the safe write — see
+     * applyAccepted() — so "Accept" in the admin UI actually changes the
+     * archive rather than only relabelling the review row.
+     *
+     * @return array{ok:bool,note?:string,error?:string}
      */
-    public static function resolveReview(?PDO $db, int $decisionId, string $outcome): bool
+    public static function resolveReview(?PDO $db, int $decisionId, string $outcome): array
     {
-        if ($db === null || !rmResearchTablesExist()) return false;
-        if (!in_array($outcome, ['accepted', 'kept_existing', 'ignored'], true)) return false;
+        if ($db === null || !rmResearchTablesExist()) return ['ok' => false, 'error' => 'Database unavailable.'];
+        if (!in_array($outcome, ['accepted', 'kept_existing', 'ignored'], true)) {
+            return ['ok' => false, 'error' => 'Unknown decision or outcome.'];
+        }
         try {
+            $q = $db->prepare('SELECT * FROM research_decisions WHERE decision_id = ?');
+            $q->execute([$decisionId]);
+            $row = $q->fetch(PDO::FETCH_ASSOC);
+            if (!$row) return ['ok' => false, 'error' => 'Unknown decision or outcome.'];
+
+            $note = null;
+            if ($outcome === 'accepted') $note = self::applyAccepted($db, $row)['note'];
+
             $s = $db->prepare('UPDATE research_decisions SET review_status = ? WHERE decision_id = ?');
             $s->execute([$outcome, $decisionId]);
-            return $s->rowCount() > 0;
-        } catch (Throwable $e) { return false; }
+            if ($s->rowCount() === 0) return ['ok' => false, 'error' => 'Unknown decision or outcome.'];
+            return $note !== null ? ['ok' => true, 'note' => $note] : ['ok' => true];
+        } catch (Throwable $e) { return ['ok' => false, 'error' => 'Could not record the review.']; }
     }
 }

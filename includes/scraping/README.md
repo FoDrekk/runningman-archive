@@ -379,6 +379,88 @@ updated directly for fresh installs. Existing rows are untouched —
 `perceptual_hash` simply starts `NULL` until an episode's thumbnail is
 next verified or re-acquired.
 
+## AI metadata intelligence & grounded synopsis (PR15)
+
+**AI is not a source of truth, and AI-generated metadata must be
+grounded in evidence.** PR15 did not rebuild the AI layer — the
+pipeline PR #4 already built (external sources → evidence → resolution
+→ AI reasoning → validation → review/safe write) already matched the
+brief: `RmAiSynopsisService` already refused to draft below a minimum
+fact count, already ran every draft through `RmGroundingValidator`
+before trusting it, and already gated automatic *synopsis* generation
+on `ai.mode === 'auto'` plus a high-confidence threshold. The audit
+found four narrow, real gaps in that pipeline and fixed only those:
+
+- **The conflict-resolution provider had no mode gate.**
+  `RmAiDecisionProvider::decide()` (`AiReasoning.php`) mapped a
+  confident `USE_SOURCE_DATA` reply straight to `UPDATE` — an
+  auto-writable decision (`RmDecision::isSafe()`) — using only the
+  `ai.thresholds.review` bar, with no check of `ai.mode` at all. Unlike
+  `RmAiSynopsisService`'s GENERATE path, a source-conflict resolution
+  could reach an unattended write even in the default `review` mode.
+  Fixed to mirror the synopsis path exactly: `USE_SOURCE_DATA` becomes
+  `UPDATE` only when `ai.mode === 'auto'` **and** confidence clears the
+  stricter `ai.thresholds.high` bar; otherwise it is `REVIEW`, exactly
+  like every other unresolved conflict. The existing safeguard that
+  refuses a chosen source no candidate actually offered is unchanged.
+- **"Accept" in the review inbox didn't write anything.**
+  `RmDecisionEngine::resolveReview($db, $id, 'accepted')` only ever
+  relabelled the `research_decisions` row's `review_status` — the
+  admin "Accept" button never touched the episode. That meant an
+  approved AI-drafted synopsis (or any other accepted conflict
+  resolution) could never actually reach the archive; the pipeline's
+  final "review → safe write" step was a dead end. Fixed: accepting
+  now performs the write for the scalar fields it's safe to write
+  automatically (`title`, `air_date`, `synopsis`, `mission`,
+  `special_notes`, `teams`, `results` — the same column map
+  `RmScrapingEngine::updateEpisode()` already trusts), respects
+  `RmFieldLock` absolutely, and records field-level provenance
+  (`source: admin_review`). A field type that needs identity
+  resolution instead of a plain column write (`guests`, `location`) is
+  reported honestly — "needs identity resolution... edit it directly
+  on the episode" — never silently dropped. `resolveReview()` now
+  returns `{ok, note?, error?}` instead of a bare bool so the admin UI
+  can show that message.
+- **`ai_generation_log.applied` was always `0`.** `consider()` logs its
+  decision before the caller has attempted the actual write — whether
+  a `GENERATE` decision survives `RmDecision::isSafe()` and the
+  anomaly veto is decided later, in `RmResearchService`. The provenance
+  audit trail (Section 6 of the brief) is only honest if `applied`
+  reflects what actually happened, so `RmAiSynopsisService::markApplied()`
+  is now called once the write is confirmed, updating the most recent
+  log row for that episode/run.
+- **"Regenerate" had nothing to attach to.** `consider()`'s own
+  `force` option (bypass "a usable synopsis already exists") was never
+  threaded through from `RmResearchService::researchEpisode()`. Fixed
+  via a new `regenerate_synopsis` research option, wired to a
+  "Regenerate synopsis" button in Auto Sync's preview panel — every
+  other AI safety gate (evidence, grounding, mode, thresholds) still
+  applies to the redraft exactly as it does to the first draft.
+
+**AI modes, unchanged and now correctly enforced everywhere they
+apply**: `disabled` never calls AI at all; `review` (the existing,
+preserved default) always produces a proposal for a human, never an
+unattended write, for *both* AI use — synopsis drafting and conflict
+resolution; `auto` allows an unattended write only past the strict
+`high` threshold. Auto Sync's stat grid now shows the current AI
+mode/availability at a glance (`AI synopsis` tile, reads directly from
+`RmAiClient` — no API keys, no complicated dashboard, just the same
+config already driving the engine).
+
+**Cost/usage bounds, audited, not changed**: AI is only ever invoked
+per-episode, from `RmResearchService::researchEpisode()`, triggered by
+an admin action (Auto Sync's `preview`/`apply_safe`) or a single
+episode inside a bounded, admin-triggered scraper run — never from
+`admin/cron.php`'s unattended weekly update, which calls
+`RmScrapingEngine` directly and has no AI integration at all. There is
+no code path that calls AI across the whole archive automatically.
+
+**Field-level, unchanged**: AI only ever proposes one field at a time —
+`synopsis` for `RmAiSynopsisService`, whichever single field a
+conflict concerns for `RmAiDecisionProvider` — and each field keeps its
+own decision, confidence and provenance; nothing here ever replaces a
+full episode record.
+
 ## Tests
 
 ```
@@ -392,6 +474,7 @@ php tests/research.php               # run state, evidence, decisions, research 
 php tests/pr12.php                   # Fandom + TVmaze: registry wiring, extraction, status
 php tests/pr13.php                   # new-scope queue evidence, new-episode air_date guard, priority bands
 php tests/pr14.php                   # thumbnail classify() states, perceptual hash, scoring, dry-run
+php tests/pr15.php                   # AI mode gating (conflict resolution), review-inbox safe write, applied provenance, regenerate
 ```
 
 All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP

@@ -106,7 +106,12 @@ class RmResearchService
     // ────────────────────────────────────────────────────────────
     /**
      * @param array $opt mode, dry_run, fields, force, run (RmResearchRun),
-     *                   bypass_cache, skip_thumbnail, auto_apply
+     *                   bypass_cache, skip_thumbnail, auto_apply,
+     *                   regenerate_synopsis (admin "Regenerate" action —
+     *                   lets the AI layer draft a new synopsis even when a
+     *                   usable one already exists; every other AI safety
+     *                   gate — evidence, grounding, mode, thresholds —
+     *                   still applies)
      */
     public function researchEpisode(int $epNum, array $opt = []): array
     {
@@ -241,7 +246,7 @@ class RmResearchService
                 'special_notes' => $existing['special_notes'] ?? null,
             ], fn($v) => $v !== null && $v !== '' && $v !== []);
             $aiResult = $this->aiSynopsis->consider($epNum, $existing['synopsis'] ?? null, $facts,
-                ['run_id' => $run?->id()]);
+                ['run_id' => $run?->id(), 'force' => !empty($opt['regenerate_synopsis'])]);
             $note('AI synopsis: ' . $aiResult['decision'] . ' — ' . mb_strimwidth($aiResult['reason'], 0, 90, '…'),
                   in_array($aiResult['decision'], ['REJECT', 'RETRY_LATER'], true) ? 'warning' : 'info');
 
@@ -296,6 +301,10 @@ class RmResearchService
             $evidence->persist($this->db, $epNum, $run?->id());
             RmDecisionEngine::persist($this->db, $epNum, $decisions, $run?->id(),
                                       empty($result['failed']) ? $applied : []);
+            if ($aiResult !== null && $aiResult['decision'] === 'GENERATE'
+                && empty($result['failed']) && in_array('synopsis', $applied, true)) {
+                $this->aiSynopsis->markApplied($epNum, $run?->id());
+            }
             foreach ($anomalies as $a) {
                 $this->prov->flag('anomaly', 'episode', null, $epNum, $a['message']);
             }
