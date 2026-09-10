@@ -249,6 +249,7 @@ ALTER TABLE scrape_runs
 INSERT IGNORE INTO source_health (source_name, status) VALUES
     ('sbs','unknown'), ('wikipedia','unknown'), ('kowiki','unknown'),
     ('myrunningman','unknown'), ('myrm','unknown'),
-    ('tvdb','unknown'), ('kshow123','unknown'), ('imdb','unknown');
+    ('tvdb','unknown'), ('kshow123','unknown'), ('imdb','unknown'),
+    ('fandom','unknown'), ('tvmaze','unknown');    -- PR12
 
 SELECT 'Scraping engine tables created' AS status;

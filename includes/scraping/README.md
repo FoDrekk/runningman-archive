@@ -93,13 +93,21 @@ A source only earns its place if it supplies information the others
 don't, or independently corroborates them. More sources is not better
 data.
 
-## Sources (PR #4 policy)
+## Sources (PR #4 policy, extended by PR12)
 
-Eight sources, each with an explicit role. Wikipedia EN is canonical
+Ten sources, each with an explicit role. Wikipedia EN is canonical
 for episode metadata; nothing silently falls back to a weaker source to
 replace it, and nothing outside this list gets contacted at all —
 MyDramaList, TMDB, Wikidata, AsianWiki and every other unreliable/unused
 adapter discovered during the PR #4 audit were removed, not disabled.
+PR12 benchmarked ~10-20 further candidates against this same bar (see
+that PR's description for the full matrix) and added exactly the two
+that survived it — Namuwiki, Trakt.tv, OMDb, Korean streaming platforms
+and a Wikipedia-derived Kaggle dataset were all researched and rejected,
+for reasons ranging from no public API and an incompatible license
+(Namuwiki) to shared upstream lineage with a source already on this list
+(Trakt.tv/TVDB, OMDb/IMDb) to ToS/paywall risk (streaming platforms).
+"More sources is not better data" — see below — held for PR12 too.
 
 | Source | Role | Class |
 |---|---|---|
@@ -111,6 +119,8 @@ adapter discovered during the PR #4 audit were removed, not disabled.
 | TheTVDB | Independent episode/date verification | secondary |
 | KShow123 | Secondary availability check, thumbnail fallback | metadata |
 | IMDb | **Diagnostics/verification only** — see below | metadata |
+| Running Man Wiki (Fandom) | Fan-editorial corroboration/fill — guests, location, mission (PR12) | secondary |
+| TVmaze | Zero-key episode/title/air_date corroboration only (PR12) | secondary |
 
 ## Source classes
 
@@ -121,7 +131,7 @@ is classified by what it *is* — and that decides what it may
 | Class | Sources | May overwrite |
 |---|---|---|
 | `primary` | SBS | anything |
-| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv, TheTVDB | secondary, metadata |
+| `secondary` | Wikipedia EN/KO, myrunningman, myrm.tv, TheTVDB, Fandom, TVmaze | secondary, metadata |
 | `metadata` | KShow123, IMDb | only its own earlier values |
 | `identity` | *(none currently registered)* | nothing — not an episode source |
 
@@ -171,6 +181,49 @@ own safe default. It is consulted in exactly two places:
 verified data absolutely: a locked field is forced to `KEEP` before
 either the deterministic engine or the AI layer ever sees a threshold.
 
+## Source expansion (PR12)
+
+Two new adapters, both registered `tier => 1` and placed **last** in
+every `field_priority` list they appear in (`config/scraping.php`) —
+neither has a production track record, so neither may outrank a source
+that does. Both can only FILL a gap nothing else supplied, or
+corroborate an existing value; the class-rank/overwrite-margin guards
+that already protect every other secondary source protect these too.
+
+- **`FandomScraper`** (`scrapers/FandomScraper.php`) — Running Man Wiki
+  (runningman.fandom.com), read through the standard MediaWiki
+  `action=parse` API (not the newer Wikimedia REST API, which is a
+  Wikimedia-specific extension nothing confirms a third-party Fandom
+  wiki runs). Fields come from Fandom's platform-standard "portable
+  infobox" markup, read generically by label text — never by a
+  bespoke, page-specific selector guessed without live verification.
+  The *resolved* page title (after redirects) is checked against the
+  requested episode number before any field is trusted, so a redirect
+  to the wrong article can never be mistaken for that episode's data.
+- **`TvMazeScraper`** (`scrapers/TvMazeScraper.php`) — api.tvmaze.com,
+  deliberately narrow: episode-number/title/air_date corroboration
+  only, nothing else. It needs no API key, unlike TheTVDB, which is
+  why it earns a place alongside it rather than duplicating it — but
+  its independence from TVDB's own data for a niche foreign show isn't
+  fully confirmed, which is part of why it stays tier 1. Absolute
+  episode numbers are extracted from each TVmaze episode's own name via
+  the same digit-extraction heuristic already shipped in
+  `TheTvdbScraper::locate()`, exposed as the pure, directly-tested
+  `TvMazeScraper::absoluteEpisodeNumber()`.
+
+Both were live-probed against their real endpoints, through the normal
+`RmHttpClient` (robots.txt-respecting, no special-casing) before being
+written — see `tests/pr12.php` and the PR12 description for what that
+probe could and couldn't establish from a build sandbox whose network
+egress is restricted to a fixed allow-list: it confirmed the requests
+are constructed correctly and are refused by the sandbox's own proxy
+(not by either site), the same limitation already on record from
+PR10/PR11. No workaround was attempted for that restriction, in the
+sandbox or in the adapters themselves — a real block from either site in
+production degrades through the existing `blocked`/`fetch_failed`
+classification and `SourceHealth` cool-down, exactly like any other
+adapter.
+
 ## Tests
 
 ```
@@ -181,6 +234,7 @@ php tests/ai.php                     # AI grounding, synopsis decisions, thresho
 php tests/migration.php --fresh      # the migration is additive and idempotent
 php tests/integration.php            # write path, modes, dry run, cron recovery
 php tests/research.php               # run state, evidence, decisions, research memory
+php tests/pr12.php                   # Fandom + TVmaze: registry wiring, extraction, status
 ```
 
 All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP

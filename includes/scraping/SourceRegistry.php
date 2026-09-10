@@ -20,6 +20,8 @@ require_once __DIR__ . '/scrapers/SbsScraper.php';
 require_once __DIR__ . '/scrapers/TheTvdbScraper.php';
 require_once __DIR__ . '/scrapers/KShow123Scraper.php';
 require_once __DIR__ . '/scrapers/ImdbScraper.php';
+require_once __DIR__ . '/scrapers/FandomScraper.php';
+require_once __DIR__ . '/scrapers/TvMazeScraper.php';
 
 class RmSourceRegistry
 {
@@ -37,6 +39,8 @@ class RmSourceRegistry
             new TheTvdbScraper(),
             new KShow123Scraper(),
             new ImdbScraper(),
+            new FandomScraper(),
+            new TvMazeScraper(),
         ] as $s) {
             $this->scrapers[$s->name()] = $s;
         }
