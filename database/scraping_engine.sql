@@ -199,14 +199,16 @@ CREATE TABLE IF NOT EXISTS thumbnail_meta (
     source_url      VARCHAR(500) NULL,
     local_path      VARCHAR(300) NULL,
     content_hash    CHAR(40)     NULL,
+    perceptual_hash CHAR(16)     NULL,   -- PR14: dHash, for near-duplicate (SUSPECT_DUPLICATE) detection — see RmThumbnailEngine::perceptualHash()
     width           INT          NULL,
     height          INT          NULL,
     bytes           INT          NULL,
     content_type    VARCHAR(60)  NULL,
-    status          VARCHAR(20)  NOT NULL DEFAULT 'unknown',   -- ok|broken|rejected|duplicate|missing
+    status          VARCHAR(20)  NOT NULL DEFAULT 'unknown',   -- ok|broken|invalid|rejected|duplicate|missing
     last_checked_at DATETIME     NULL,
     updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_hash   (content_hash),
+    INDEX idx_phash  (perceptual_hash),
     INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

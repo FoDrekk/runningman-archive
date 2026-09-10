@@ -392,6 +392,11 @@ function rmScrapeDefaultConfig(): array {
             'target_h'    => 720,
             'jpeg_quality'=> 92,
             'recheck_days'=> 45,
+            // PR14 — candidate quality, not just byte validity:
+            'min_aspect_ratio'       => 0.3,   // narrower than this (a tall banner strip) is rejected outright
+            'max_aspect_ratio'       => 3.5,   // wider than this (a thin header strip) is rejected outright
+            'min_score'              => 0.40,  // RmThumbnailEngine::scoreCandidate() floor — see that method
+            'near_duplicate_distance'=> 8,      // dHash Hamming distance (of 64 bits) below which two images count as visually near-identical
         ],
     ];
 }

@@ -11,6 +11,45 @@ adminCheck();
 
 $db = getDB();
 
+// AJAX — dry run: exactly what "grab" would do (fetch, validate, score
+// every candidate in priority order) but stops before store()/link() —
+// see RmThumbnailEngine::acquire()'s dry_run option. The database,
+// thumbnail files and provenance are all untouched.
+if (isset($_GET['a']) && $_GET['a']==='preview' && isset($_GET['ep'])) {
+    header('Content-Type: application/json');
+    set_time_limit(60);
+    $n = (int)$_GET['ep'];
+    try {
+        require_once __DIR__ . '/../includes/scraping/bootstrap.php';
+        $engine    = new RmScrapingEngine();
+        $collected = $engine->collect($n, ['image_url'], ['read_only' => true]);
+        $candidates = [];
+        foreach ((array)rmScrapeConfig('field_priority.image_url', []) as $src) {
+            $url = $collected['payloads'][$src]['image_url'] ?? null;
+            if (is_string($url) && $url !== '') $candidates[] = ['url' => $url, 'source' => $src];
+        }
+        $te   = new RmThumbnailEngine($db);
+        $cur  = $te->classify($n);
+        if (!$candidates) {
+            echo json_encode(['ok'=>true,'ep'=>$n,'current_state'=>$cur['state'],
+                               'decision'=>'NO_VALID_CANDIDATE','reason'=>'No source offered an image URL']);
+            exit;
+        }
+        $res = $te->acquire($n, rmYear($n), $candidates, ['dry_run' => true]);
+        echo json_encode([
+            'ok' => true, 'ep' => $n, 'current_state' => $cur['state'],
+            'decision' => $res['ok'] ? ($res['decision'] ?? 'REPLACE') : 'NO_VALID_CANDIDATE',
+            'source' => $res['source'], 'url' => $res['url'], 'score' => $res['score'] ?? null,
+            'relevant' => $res['relevant'] ?? null, 'width' => $res['width'], 'height' => $res['height'],
+            'reason' => $res['reason'], 'tried' => array_map(
+                fn($a) => ($a['source'] ?? '?') . ': ' . ($a['reason'] ?? 'ok'), (array)$res['attempts']),
+        ]);
+    } catch (Throwable $e) {
+        echo json_encode(['ok'=>false,'ep'=>$n,'error'=>$e->getMessage()]);
+    }
+    exit;
+}
+
 // AJAX grab one thumbnail
 // Goes through the thumbnail engine, so a single episode now tries EVERY
 // source that offered an image (in image_url priority order) instead of
@@ -88,7 +127,7 @@ if (isset($_GET['a']) && $_GET['a'] === 'quality') {
             "SELECT episode_number FROM episodes WHERE thumbnail_id IS NOT NULL ORDER BY episode_number"
         )->fetchAll(PDO::FETCH_COLUMN);
 
-        $byStatus = ['ok' => 0, 'broken' => 0, 'missing' => 0];
+        $byStatus = ['ok' => 0, 'broken' => 0, 'invalid' => 0, 'missing' => 0];
         $bad = [];
         foreach ($eps as $ep) {
             $r = $te->verify((int)$ep);
@@ -124,13 +163,42 @@ if (isset($_GET['a']) && $_GET['a'] === 'quality') {
             }
         } catch (Throwable $e) { /* thumbnail_meta not installed — skip */ }
 
+        // Visually similar but NOT byte-identical — SUSPECT_DUPLICATE.
+        // Same non-destructive, label-only posture as the exact-duplicate
+        // block above: this only ever informs the "Inspect" action, never
+        // deletes or replaces anything by itself.
+        $nearDuplicates = [];
+        try {
+            $rows = $db->query(
+                "SELECT episode_number, perceptual_hash, content_hash FROM thumbnail_meta
+                  WHERE perceptual_hash IS NOT NULL AND perceptual_hash <> '' ORDER BY episode_number"
+            )->fetchAll(PDO::FETCH_ASSOC);
+            $seen = [];
+            foreach ($rows as $a) {
+                if (isset($seen[$a['episode_number']])) continue;
+                $group = [(int)$a['episode_number']];
+                foreach ($rows as $b) {
+                    if ($a['episode_number'] === $b['episode_number'] || isset($seen[$b['episode_number']])) continue;
+                    // Already an EXACT duplicate — reported in $duplicates above, not here.
+                    if ($a['content_hash'] !== null && $a['content_hash'] === $b['content_hash']) continue;
+                    if (RmThumbnailEngine::hammingDistance((string)$a['perceptual_hash'], (string)$b['perceptual_hash'])
+                        <= (int)rmScrapeConfig('thumbnail.near_duplicate_distance', 8)) {
+                        $group[] = (int)$b['episode_number'];
+                        $seen[$b['episode_number']] = true;
+                    }
+                }
+                if (count($group) > 1) { $nearDuplicates[] = $group; $seen[$a['episode_number']] = true; }
+            }
+        } catch (Throwable $e) { /* thumbnail_meta / perceptual_hash not installed — skip */ }
+
         $missingThumb = (int)$db->query(
             "SELECT COUNT(*) FROM episodes WHERE thumbnail_id IS NULL"
         )->fetchColumn();
 
         echo json_encode([
             'ok' => true, 'checked' => count($eps), 'by_status' => $byStatus,
-            'bad' => $bad, 'duplicates' => $duplicates, 'no_thumbnail_at_all' => $missingThumb,
+            'bad' => $bad, 'duplicates' => $duplicates, 'near_duplicates' => $nearDuplicates,
+            'no_thumbnail_at_all' => $missingThumb,
         ]);
     } catch (Throwable $e) {
         echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
@@ -253,7 +321,11 @@ $pct      = $total > 0 ? round($verified/$total*100) : 0;
     <input type="number" id="bTo" value="<?= $dbMax ?>" style="width:70px;padding:.35rem .5rem;background:#141c2c;border:1px solid rgba(41,171,226,.14);border-radius:6px;color:#eef2f8;font-size:.8rem;outline:none">
     <button class="btn btn-dark btn-sm" onclick="batchGrab(+document.getElementById('bFrom').value,+document.getElementById('bTo').value)">Grab Range</button>
     <button class="btn btn-ghost btn-sm" id="btnStop" onclick="stopFlag=true" style="display:none">⏹ Stop</button>
+    <span style="color:rgba(255,255,255,.3);font-size:.8rem">·</span>
+    <input type="number" id="pEp" placeholder="EP#" style="width:70px;padding:.35rem .5rem;background:#141c2c;border:1px solid rgba(41,171,226,.14);border-radius:6px;color:#eef2f8;font-size:.8rem;outline:none">
+    <button class="btn btn-ghost btn-sm" onclick="previewThumb()" title="Fetch, validate and score every candidate — writes nothing">🔍 Dry run</button>
   </div>
+  <div id="previewResult" style="margin-bottom:.75rem;font-size:.78rem"></div>
   <div id="bProg" style="display:none;margin-bottom:.75rem">
     <div style="display:flex;justify-content:space-between;font-size:.72rem;color:rgba(255,255,255,.35);margin-bottom:.3rem">
       <span id="bLbl"></span><span id="bPct"></span>
@@ -290,10 +362,11 @@ async function runQualityCheck(){
     var r=await fetch(BP+'/admin/thumbnails.php?a=quality');
     var d=await r.json();
     if(!d.ok){ out.innerHTML='<div class="alert alert-err">'+d.error+'</div>'; return; }
-    var html='<div style="display:flex;gap:1.5rem;margin-bottom:.8rem;font-size:.8rem">'
-      +'<span>✓ OK: <strong style="color:#86efac">'+(d.by_status.ok||0)+'</strong></span>'
+    var html='<div style="display:flex;gap:1.5rem;margin-bottom:.8rem;font-size:.8rem;flex-wrap:wrap">'
+      +'<span>✓ Valid: <strong style="color:#86efac">'+(d.by_status.ok||0)+'</strong></span>'
       +'<span>✗ Broken: <strong style="color:#fca5a5">'+(d.by_status.broken||0)+'</strong></span>'
-      +'<span>— No thumbnail at all: <strong style="color:#fcd34d">'+d.no_thumbnail_at_all+'</strong></span>'
+      +'<span>⚠ Invalid: <strong style="color:#fb923c">'+(d.by_status.invalid||0)+'</strong></span>'
+      +'<span>— Missing: <strong style="color:#fcd34d">'+d.no_thumbnail_at_all+'</strong></span>'
       +'</div>';
     lastBadEpisodes=d.bad.map(function(b){return b.episode});
     if(d.bad.length){
@@ -313,8 +386,13 @@ async function runQualityCheck(){
           return 'EP'+g.episodes.split(',').join(', EP')+' share one image — <span style="color:'+color+'">'+label+'</span>';
         }).join('\n')+'</div>';
     }
-    if(!d.bad.length && !d.duplicates.length){
-      html+='<div class="alert alert-ok">✓ No bad or duplicate thumbnails found across '+d.checked+' checked.</div>';
+    if(d.near_duplicates && d.near_duplicates.length){
+      html+='<div style="font-weight:700;font-size:.8rem;color:#c4b5fd;margin:.6rem 0 .4rem">Visually similar images ('+d.near_duplicates.length+') — SUSPECT_DUPLICATE, not byte-identical, nothing auto-changed</div>'
+        +'<div class="sc-log" style="max-height:160px;overflow-y:auto;font-size:.74rem">'
+        +d.near_duplicates.map(function(g){return 'EP'+g.map(pad).join(', EP')+' look alike but are not identical files — review manually';}).join('\n')+'</div>';
+    }
+    if(!d.bad.length && !d.duplicates.length && !(d.near_duplicates&&d.near_duplicates.length)){
+      html+='<div class="alert alert-ok">✓ No bad, duplicate or suspect-duplicate thumbnails found across '+d.checked+' checked.</div>';
     }
     out.innerHTML=html;
   }catch(e){ out.innerHTML='<div class="alert alert-err">Request failed: '+e.message+'</div>'; }
@@ -373,6 +451,24 @@ async function grabList(list){
   document.getElementById('bBar').style.background=ok>0?'#22c55e':'#29ABE2';
   bRunning=false;document.getElementById('btnAll').disabled=false;document.getElementById('btnStop').style.display='none';
   toast('Done: '+ok+' thumbnails saved');
+}
+async function previewThumb(){
+  var ep = +document.getElementById('pEp').value;
+  var out = document.getElementById('previewResult');
+  if(!ep){toast('Enter an episode number');return}
+  out.innerHTML = '<span class="spin"></span> Checking EP'+pad(ep)+'…';
+  try{
+    var r = await fetch(BP+'/admin/thumbnails.php?a=preview&ep='+ep);
+    var d = await r.json();
+    if(!d.ok){ out.innerHTML = '<span style="color:#fca5a5">'+(d.error||'Failed')+'</span>'; return; }
+    var color = d.decision==='REPLACE' ? '#86efac' : '#fcd34d';
+    out.innerHTML = '<div style="border:1px solid rgba(41,171,226,.14);border-radius:8px;padding:.6rem .8rem">'
+      + '<b>EP'+pad(ep)+'</b> — current: <b>'+d.current_state+'</b> · decision: <b style="color:'+color+'">'+d.decision+'</b>'
+      + (d.source ? '<br>Candidate: '+d.source+' · score '+d.score+' · '+d.width+'×'+d.height+(d.relevant===false?' · <span style="color:#fb923c">URL looks like a different episode</span>':'') : '')
+      + (d.reason ? '<br><span style="color:rgba(255,255,255,.4)">'+d.reason+'</span>' : '')
+      + '<br><span style="color:rgba(255,255,255,.3);font-size:.72rem">Dry run — nothing written</span>'
+      + '</div>';
+  }catch(e){ out.innerHTML = '<span style="color:#fca5a5">Request failed: '+e.message+'</span>'; }
 }
 function repairBroken(){
   if(!lastBadEpisodes.length){toast('Run the quality check first');return}
