@@ -90,6 +90,7 @@ body{font-family:'Inter',sans-serif;background:#080c12;color:#eef2f8;min-width:1
   <a href="<?= $bp ?>/admin/export.php"           <?= $pg==='export' ?'class="on"':'' ?>><span>📦</span> Export</a>
   <div class="sb-sec">System</div>
   <a href="<?= $bp ?>/admin/health.php"           <?= $pg==='health' ?'class="on"':'' ?>><span>🩺</span> System Health</a>
+  <a href="<?= $bp ?>/admin/archive_health.php"   <?= $pg==='archive_health' ?'class="on"':'' ?>><span>📋</span> Archive Health</a>
   <a href="<?= $bp ?>/admin/diagnostics.php"       <?= $pg==='diagnostics' ?'class="on"':'' ?>><span>🛠️</span> Diagnostics</a>
   <div class="sb-sec">Site</div>
   <a href="<?= $bp ?>/index.php" target="_blank"><span>🌐</span> View Site</a>

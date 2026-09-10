@@ -461,6 +461,96 @@ conflict concerns for `RmAiDecisionProvider` — and each field keeps its
 own decision, confidence and provenance; nothing here ever replaces a
 full episode record.
 
+## Archive verification & health (PR16)
+
+**Archive Health is a diagnostic system. It does not automatically
+repair the archive.** SCAN → DETECT → CLASSIFY → EXPLAIN → RECOMMEND,
+never SCAN → AUTO FIX. `RmArchiveHealth` (`ArchiveHealth.php`) is a
+thin, read-only aggregator — PR16 did not rebuild integrity checking;
+every domain below is built entirely from a class PR10–PR15 already
+shipped:
+
+| Domain | Built from |
+|---|---|
+| A. Episode Coverage | `RmResearchState::archiveCoverage()` (PR11/PR13) + `RmDuplicateDetector::fullCheck()` (PR #4) |
+| B. Metadata Integrity | `RmMissingData::coreCompleteness()`/`fieldGapCounts()` (PR11) + `fullCheck()`'s date/reference checks |
+| C. Research Integrity | `RmResearchState::archiveHealth()` + `attention()` (PR11/PR13) |
+| D. Thumbnail Integrity | `RmThumbnailEngine::classify()` — the six-state model (PR14) |
+| E. Source Health | `RmSourceHealth::all()` (PR10) |
+| F. Latest Episode Verification | `RmLatestEpisode::detectDetailed()` (PR13) |
+| G. Provenance / AI Application Integrity | **new** — see below |
+
+Domain G is the one genuinely new check: nothing before PR16 audited
+whether AI/decision provenance is internally *consistent*, only
+whether it was *recorded*. It checks structural invariants that the
+write-gates in `Decision.php`/`AiSynopsis.php`/`AiReasoning.php`
+(PR15) are supposed to guarantee — an `ai_generation_log` row marked
+`applied` despite `grounding_status = 'rejected'`, an `applied` row
+whose logged decision was never `GENERATE`, a `research_decisions` row
+marked `applied` for a decision other than `UPDATE`/`FILL`
+(`RmDecision::isSafe()`'s own vocabulary), or an `applied` synopsis
+whose field is empty now. A hit here means a write-gate was bypassed —
+a bug or a manual edit — not a normal archive condition.
+
+**Every issue** (`RmArchiveHealth::scan()`'s `issues` array) carries:
+`id`, `domain`, `severity` (`INFO`/`WARNING`/`ERROR`/`CRITICAL`),
+`episode` (nullable — many issues are archive-wide, not per-episode),
+`description`, `evidence`, `recommended_action` (always an existing
+controlled workflow — Auto Sync, Thumbnail Recovery, the review inbox
+— never a button that runs one), `safe_to_auto_repair` (always
+`false` today — nothing here writes), and `detected_at`.
+`RmArchiveHealth::filterIssues()` is a pure filter over that list
+(severity/domain/episode/id) — the admin page filters client-side over
+the same array rather than re-deriving anything, so a filtered view
+can never disagree with the full one.
+
+**No blended numeric health score.** The brief is explicit that a
+score without a shown calculation is worse than no score
+("`Archive Health: 87%` without showing how" is exactly what not to
+build) — this PR ships the domain-by-domain status breakdown instead
+(`GOOD`/`WARNING`/`ERROR`/`CRITICAL`/`EMPTY`/`UNKNOWN`/`NOT_INSTALLED`,
+plus semantic labels for Latest Verification —
+`VERIFIED`/`CONFLICT`/`MISSING_AIRED_EPISODES`/`UNKNOWN`). Explainability
+over a cosmetic number.
+
+**Never invents confidence.** Two examples the audit specifically
+found and fixed while building this:
+- *Latest-episode verification* only ever reports what
+  `RmLatestEpisode::detectDetailed()` (or a cached one) actually
+  established — `SOURCE_UNAVAILABLE`/`NOT_CHECKED`/
+  `INSUFFICIENT_EVIDENCE` all map to the honest `UNKNOWN`, never a
+  guessed episode number.
+- *Source health* only counts a source as "independent evidence
+  remains available" when it is **confirmed** `ok` — a source that has
+  simply never been tried (`unknown`) does not count toward that
+  reassurance, even though it isn't confirmed broken either. Counting
+  "untested" as "available" would be exactly the invented confidence
+  Section 7/10 of the brief warns against.
+
+**Read-only, always, and bounded.** No method in `ArchiveHealth.php`
+writes anything. Thumbnail classification and the provenance audit are
+capped (`archive_health.thumbnail_scan_limit` /
+`.provenance_scan_limit`, both in `config/scraping.php`) so an explicit
+scan on a large archive stays fast and predictable — the report says
+`capped: true` when it only covered part of the archive rather than
+silently under-reporting. Live latest-episode verification is opt-in
+only (`?fresh=1` on Admin → Archive Health, exactly like Auto Sync's
+own "Detect Latest" button) — a scan never contacts a network source
+on its own.
+
+**Empty/partial archives are handled honestly.** Zero episodes reports
+`EMPTY`, not a vacuous "100% healthy" — Section 19's exact requirement.
+Every domain degrades the same way every class in this codebase
+already does when a table or connection is missing (`NOT_INSTALLED` /
+`UNKNOWN`, never a fabricated `GOOD`).
+
+**Admin UI** — `admin/archive_health.php` (linked from the sidebar and
+the dashboard's Quick Actions): seven domain cards, an "Attention
+Required" issue list with severity/domain/episode filters, and two
+buttons — "Run Health Scan" (DB-only) and "Scan + Verify Latest Live"
+(the one opt-in network call). No repair actions; every recommendation
+is a link to an existing page.
+
 ## Tests
 
 ```
@@ -475,6 +565,7 @@ php tests/pr12.php                   # Fandom + TVmaze: registry wiring, extract
 php tests/pr13.php                   # new-scope queue evidence, new-episode air_date guard, priority bands
 php tests/pr14.php                   # thumbnail classify() states, perceptual hash, scoring, dry-run
 php tests/pr15.php                   # AI mode gating (conflict resolution), review-inbox safe write, applied provenance, regenerate
+php tests/pr16.php                   # archive health: 7 domains, severity, determinism, read-only, empty-archive, provenance invariants
 ```
 
 All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP
