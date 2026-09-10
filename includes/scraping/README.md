@@ -30,7 +30,7 @@ and a source rather than to "the scraper".
 | `DiffEngine.php` | Old vs new, plus the guards that refuse unsafe writes. |
 | `Provenance.php` | Where every value came from; change log; review flags. |
 | `SourceHealth.php` | Which sources are broken, and *how*. |
-| `ThumbnailEngine.php` | Validated image acquisition with cross-source fallback. |
+| `ThumbnailEngine.php` | Validated, scored image acquisition with cross-source fallback and a six-state classifier — see below. |
 | `MissingData.php` | Gap detection and target selection per scraping mode. |
 | `Integrity.php` | Duplicate suspicion, guest identity, latest-episode detection. |
 | `Http.php` / `Cache.php` | Classified failures, retry policy, rate limiting, robots, TTL cache. |
@@ -295,6 +295,90 @@ sourcesForFields()`), the same dry-run/safe-write path
 and the same `max_per_run` cap — nothing here runs an unbounded resync,
 and nothing in PR13 changes that.
 
+## Thumbnail recovery & quality (PR14)
+
+`RmThumbnailEngine` already did most of what a thumbnail system needs
+before this PR: validated real image bytes rather than trusting HTTP 200
+(HTML served as `image/jpeg`, a tracking pixel, and a truncated download
+were all already caught), fell back across every candidate source in
+`field_priority.image_url` order, never displaced a good stored file
+with a bad fetch, skipped re-downloading identical bytes, flagged
+byte-identical images shared across episodes for human review (never
+auto-deleted), and resolved Windows/XAMPP paths correctly
+(`absolutePath()`'s regex only ever matches a strict `ep<digits>.<ext>`
+filename, which makes path traversal impossible by construction, not
+merely filtered). PR14 did not rebuild any of that — it closed the
+specific, narrow gaps a full audit actually found.
+
+**The six-state model** — `RmThumbnailEngine::classify()` — is a thin
+aggregator over signals the class already computed, not a parallel
+system:
+
+| State | Meaning | Composed from |
+|---|---|---|
+| `VALID` | A real, decodable, non-problematic file. | `verify()` |
+| `BROKEN` | The database points at a file; the file isn't there. | `verify()` |
+| `MISSING` | No thumbnail recorded for this episode at all. | `verify()` |
+| `INVALID` | The file is there, but fails image validation (corrupted, truncated, not decodable). | `verify()` |
+| `DUPLICATE` | Byte-identical to another episode's image, and `classifyDuplicate()` doesn't consider that legitimate. | `findDuplicate()` + `classifyDuplicate()` |
+| `SUSPECT_DUPLICATE` | Visually similar (not byte-identical) to another episode's image — confidence insufficient for automatic action. | `findNearDuplicate()` |
+
+`BROKEN` and `INVALID` used to be the same status (`broken`) — a
+missing-file problem and a corrupted-file problem are different things
+with different fixes, so `verify()` now tells them apart. A
+byte-identical image shared between **adjacent** episode numbers
+(`classifyDuplicate()` → `LEGITIMATE_SHARED_IMAGE`, the real two-part-
+special case) is reported as `VALID`, not `DUPLICATE` — **duplicate is
+not automatically wrong**, and this model never pretends otherwise.
+
+**Near-duplicate detection** (`perceptualHash()` / `hammingDistance()` /
+`findNearDuplicate()`) is new: a deterministic dHash (9×8 grayscale
+gradient → 64 bits) computed alongside the existing SHA-1 content hash
+at store time. Two images compress to different bytes but decode to the
+same or near-identical gradient (a re-compression, a minor crop) land a
+few bits apart; two genuinely different images land dozens of bits
+apart. Like exact-duplicate detection, this only ever labels a group for
+`admin/thumbnails.php` to show — nothing here deletes, merges or
+replaces anything automatically.
+
+**Candidate scoring** (`scoreCandidate()`) answers a question raw byte
+validation can't: a technically valid, decodable image can still be the
+wrong one to trust — well below the target resolution, from a source
+with a poor track record, or a URL that structurally looks like it names
+a different episode (`looksRelevant()` — a heuristic that only ever
+lowers confidence, checked against the candidate's URL **path** only, so
+a port number or query string can never masquerade as an episode
+number). `acquire()` now refuses a candidate scoring below
+`thumbnail.min_score` even after it passes every byte-level check —
+"select only a sufficiently reliable candidate" from a set of otherwise-
+valid ones. `RmValidator::imageBytes()` also gained an aspect-ratio
+sanity bound (`thumbnail.min_aspect_ratio`/`max_aspect_ratio`): a 1000×50
+banner strip clears every dimension minimum but is not a thumbnail.
+
+**Dry run** — `acquire($ep, $year, $candidates, ['dry_run' => true])` —
+runs the real fetch, real byte validation and real scoring, then stops:
+nothing is written to disk, no `thumbnail_meta`/`thumbnails` row changes,
+no provenance is recorded. `admin/thumbnails.php`'s `a=preview` action
+and its "Dry run" button expose exactly this.
+
+**Source capability, unchanged from PR12**: thumbnail candidates come
+from whichever sources declare `image_url` in `field_priority` — TVmaze
+and Fandom both correctly stay absent (neither adapter offers
+`image_url` in its `fields()`), so neither is ever asked for a
+thumbnail. This was already true before PR14; nothing needed to change.
+
+**Output format**: still JPEG via GD (`imagejpeg()`), resized/cropped to
+`thumbnail.target_w`×`target_h`. There is no WebP conversion anywhere in
+this codebase to preserve — stated plainly here rather than assumed.
+
+`database/pr14_thumbnail_quality.sql` (new, additive, mirrors the
+`pr4_source_cleanup.sql`/`pr12_source_expansion.sql` precedent) adds the
+`perceptual_hash` column to `thumbnail_meta` for a database that
+installed `scraping_engine.sql` before this PR; the base file is also
+updated directly for fresh installs. Existing rows are untouched —
+`perceptual_hash` simply starts `NULL` until an episode's thumbnail is
+next verified or re-acquired.
+
 ## Tests
 
 ```
@@ -307,6 +391,7 @@ php tests/integration.php            # write path, modes, dry run, cron recovery
 php tests/research.php               # run state, evidence, decisions, research memory
 php tests/pr12.php                   # Fandom + TVmaze: registry wiring, extraction, status
 php tests/pr13.php                   # new-scope queue evidence, new-episode air_date guard, priority bands
+php tests/pr14.php                   # thumbnail classify() states, perceptual hash, scoring, dry-run
 ```
 
 All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP
