@@ -424,6 +424,23 @@ class RmScrapingEngine
         // Restrict to the fields we actually set out to fill.
         $resolved = array_intersect_key($resolved, array_flip($wanted));
 
+        // PR13: a brand-new episode record must never be created from
+        // partial evidence that happens to include something other than
+        // an air date (e.g. a single source's location match with nothing
+        // else) — insertEpisode() falls back to a placeholder title and a
+        // NULL air_date for anything it isn't given, which is exactly the
+        // fabricated record the research queue must never produce. "This
+        // episode number exists" means "a source resolved an air date for
+        // it", nothing weaker.
+        if ($isNew && empty($resolved['air_date']['value'] ?? null)) {
+            return ['episode'=>$epNum,'skipped'=>false,'failed'=>true,
+                    'reason'=>'New episode candidate — no source resolved an air date for it; refusing to create a placeholder record',
+                    'is_new'=>true,'changes'=>[],'apply'=>[],'resolved'=>$resolved,'meta'=>$collected['meta'],
+                    'warnings'=>[['field'=>'air_date','type'=>'no_data',
+                                  'message'=>'Evidence exists for other fields but not air_date — not enough to confirm this episode aired']],
+                    'summary'=>['total_applied'=>0],'existing'=>$existing];
+        }
+
         // Tell the diff engine WHERE the current values came from, so it
         // can stop a weaker class of source from overwriting a stronger
         // one's work.
