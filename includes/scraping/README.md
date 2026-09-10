@@ -224,6 +224,77 @@ production degrades through the existing `blocked`/`fetch_failed`
 classification and `SourceHealth` cool-down, exactly like any other
 adapter.
 
+## Latest episode detection & the research queue (PR13)
+
+Seven distinct concepts, each answering a different question. Conflating
+any two of them is the exact bug class PR13 exists to close:
+
+| Concept | Answers | Where |
+|---|---|---|
+| **Archive Latest** | The highest episode number actually stored in the database. A fact about the archive, not a claim about the real world. | `RmMissingData::maxEpisode()` |
+| **Latest Verified Aired** | The highest episode number at least one live source resolved a real, past-or-today air date for, through the full evidence pipeline. Never a raw "sources mention this number" vote. | `RmLatestEpisode::detectDetailed()['latest_aired']` |
+| **Upcoming** | An announced episode whose resolved air date is in the future. Never counted as aired, never counted as missing. | `detectDetailed()['upcoming']` |
+| **Missing Episode** | A specific episode number with confirmed evidence of existing (a resolved air date) that has no row in the database yet. A coverage gap. | `detectDetailed()['missing_aired']`, `RmResearchState::attention()['new']` |
+| **Incomplete Metadata** | A row that exists, but is missing a non-identity field (synopsis, guests, …). A metadata gap, not a coverage gap — the episode is real either way. | `RmMissingData::incompleteEpisodes()` |
+| **Research State** | What was already tried for one episode, and when it's worth trying again — never "does it exist". | `RmResearchState` (PR11) |
+| **Source Health** | Whether a source itself is currently reachable — orthogonal to whether any given episode has evidence. | `RmSourceHealth` |
+
+**Evidence-based, always.** `RmLatestEpisode::detect()`/`detectDetailed()`
+(PR9/PR10) gather every signal a source can offer (each adapter's own
+`latestEpisode()`, plus a short gap-probe past the highest reported
+number) and REPORT DISAGREEMENT rather than average or pick a favourite:
+a spread of more than a couple of episodes across sources is a
+`SOURCE_DISAGREEMENT`, not a vote. Every raw number is then indepen-
+dently re-verified — the full `collect()` + `RmFieldResolver::resolve()`
+pipeline runs against each candidate past the archive max, and it is
+classified by its *resolved air date* against today's date, never by
+its mere existence as a number: `air_date <= today` is `missing_aired`
+(a real gap), `air_date > today` is `upcoming`, no resolvable air date
+at all is `insufficient_evidence`. No external signal → `SOURCE_
+UNAVAILABLE`, reported as `UNKNOWN`, never invented.
+
+**`DB latest + 1` is explicitly NOT a valid detection strategy.** It
+appears nowhere in this codebase as a way to decide what episode comes
+next — the two places that ever loop from `$dbMax + 1` are
+`RmMissingData::targetsFor('latest', …)`, which only builds a *candidate
+search space* for `detectDetailed()` to independently verify (nothing
+in that range is trusted until re-checked), and, before PR13,
+`RmResearchState::buildQueue('new', …)` — which queued that whole raw
+range as if every number in it were confirmed. **That was a real gap,
+and PR13 closed it**: `buildQueue('new', …)` now requires the caller's
+`missing_aired` list — the SPECIFIC episode numbers `detectDetailed()`
+already independently confirmed a real air date for — and queues only
+those. A confirmed EP819 with EP818 still unconfirmed queues EP819
+alone; EP818 is never interpolated in just because it sits between two
+known numbers. `admin/auto_sync.php`'s `run_start` handler for
+`scope=new` reads this list from its own cached detection state rather
+than trusting any client-supplied number, for the same reason.
+
+**A new episode record requires a resolved air date, full stop.**
+`RmScrapingEngine::plan()` will not treat a brand-new episode candidate
+as real just because some source returned evidence for a field *other*
+than `air_date` (a stray location match, say) — `insertEpisode()`'s
+placeholder-title/NULL-date fallback existed for the normal "existing
+episode, filling a gap" path and was never meant to create a row from
+nothing. PR13 added the explicit guard: no resolved `air_date` on a
+new-episode candidate means the plan is refused (`failed`, nothing
+staged to `apply`) before a single row can be written — see
+`tests/pr13.php`.
+
+**The queue is bounded, prioritised and cool-down-aware** —
+`RmResearchState::buildQueue()`/`priority()`/`queueReasons()` (PR11),
+unchanged in shape by PR13 beyond the `'new'` scope fix above and two
+added priority bands (`research_failed` once its cool-down has passed,
+and `researched_needs_review`, for when it's surfaced via an explicit/
+forced scope — `REVIEW` stays excluded from the ordinary auto-built
+queue entirely, per `isEligible()`). Every run still goes through the
+same `RmResearchService::startRun()` → `RmResearchRun` lifecycle, the
+same per-source field-capability selection (`RmSourceRegistry::
+sourcesForFields()`), the same dry-run/safe-write path
+(`RmScrapingEngine::apply()` with `dry_run` — identical code, no writes)
+and the same `max_per_run` cap — nothing here runs an unbounded resync,
+and nothing in PR13 changes that.
+
 ## Tests
 
 ```
@@ -235,6 +306,7 @@ php tests/migration.php --fresh      # the migration is additive and idempotent
 php tests/integration.php            # write path, modes, dry run, cron recovery
 php tests/research.php               # run state, evidence, decisions, research memory
 php tests/pr12.php                   # Fandom + TVmaze: registry wiring, extraction, status
+php tests/pr13.php                   # new-scope queue evidence, new-episode air_date guard, priority bands
 ```
 
 All are hermetic: they set `RM_SCRAPE_OFFLINE=1`, which makes the HTTP
