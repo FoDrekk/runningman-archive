@@ -63,6 +63,22 @@ if ($body === 'real_image') {
     imagestring($im, 5, 40, 170, 'RM FIXTURE', imagecolorallocate($im, 255, 255, 255));
     ob_start(); imagejpeg($im, null, 90); $out = ob_get_clean(); imagedestroy($im);
     header('Content-Type: image/jpeg');
+} elseif ($body === 'small_image') {
+    // PR14: a genuine, decodable image right at the bare minimum
+    // dimensions (200x112) — passes RmValidator::imageBytes() (byte
+    // validity is not in question) but scores poorly in
+    // RmThumbnailEngine::scoreCandidate() against the 1280x720 target,
+    // for testing the QUALITY threshold rather than raw validity. A
+    // gradient, not a solid fill: a solid colour JPEG-compresses down to
+    // a couple hundred bytes and would be rejected as "too small to be a
+    // real thumbnail" before ever reaching the quality score this
+    // fixture exists to test.
+    $im = imagecreatetruecolor(200, 112);
+    for ($x = 0; $x < 200; $x++) {
+        imagefilledrectangle($im, $x, 0, $x, 111, imagecolorallocate($im, $x % 256, (2 * $x) % 256, (3 * $x) % 256));
+    }
+    ob_start(); imagejpeg($im, null, 90); $out = ob_get_clean(); imagedestroy($im);
+    header('Content-Type: image/jpeg');
 } elseif (in_array($body, ['tiny_image', 'html_image'], true)) {
     header('Content-Type: image/jpeg');   // lying on purpose
 } elseif (in_array($body, ['json', 'badjson'], true)) {

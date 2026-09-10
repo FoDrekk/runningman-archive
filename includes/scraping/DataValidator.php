@@ -227,6 +227,16 @@ class RmValidator
         if ($w < (int)$cfg['min_width'] || $h < (int)$cfg['min_height']) {
             return self::fail("Image is {$w}×{$h} — below the {$cfg['min_width']}×{$cfg['min_height']} minimum (icon or tracking pixel)");
         }
+        // A real episode still is never a thin strip — a banner ad, a
+        // header sliver, a CSS sprite sheet. Genuine photos and posters
+        // land nowhere near these bounds; something that does is not a
+        // thumbnail candidate whatever its raw pixel count says.
+        $ratio = $w / max(1, $h);
+        $minR  = (float)($cfg['min_aspect_ratio'] ?? 0.3);
+        $maxR  = (float)($cfg['max_aspect_ratio'] ?? 3.5);
+        if ($ratio < $minR || $ratio > $maxR) {
+            return self::fail("Image is {$w}×{$h} (aspect ratio " . round($ratio, 2) . ") — outside the {$minR}–{$maxR} sane range for a thumbnail");
+        }
         return self::ok($bytes, ['width' => $w, 'height' => $h, 'mime' => $info['mime'] ?? $contentType]);
     }
 
