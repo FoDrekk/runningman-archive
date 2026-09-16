@@ -1,0 +1,11 @@
+{
+  "id": 3479,
+  "name": "Running Man",
+  "_embedded": {
+    "episodes": [
+      {"id": 1, "name": "Episode 818", "airdate": "2026-09-06", "image": {"medium": "https://example.com/818.jpg"}},
+      {"id": 2, "name": "Episode 819", "airdate": "2026-09-13", "image": {"medium": "https://example.com/819.jpg"}},
+      {"id": 3, "name": "Unrelated Special", "airdate": "2026-09-14", "image": null}
+    ]
+  }
+}

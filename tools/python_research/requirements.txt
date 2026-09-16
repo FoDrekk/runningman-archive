@@ -1,0 +1,9 @@
+# Python Research Engine POC — dependencies
+#
+# Intentionally empty: this POC uses only the Python standard library
+# (urllib.request, urllib.robotparser, html.parser, json, dataclasses,
+# enum, subprocess). No requests, no BeautifulSoup, no scraping
+# frameworks. Requires Python 3.10+ (uses `X | Y` union type hints).
+#
+# If a future iteration adds a real dependency, it goes here with a
+# one-line justification — never silently.
