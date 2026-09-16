@@ -7,3 +7,10 @@ config/scraping.local.php
 # Database backups (Admin -> System Health -> "Backup Now", or before a
 # bulk run) — full data dumps, never committed.
 /backups/
+
+# Python Research Engine POC (tools/python_research/) — generated
+# reports from run.py, regenerated on every run. The directory itself
+# (and .gitkeep) stay tracked so the structure ships with the repo.
+/tools/python_research/output/*.json
+__pycache__/
+*.pyc
