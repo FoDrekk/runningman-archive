@@ -190,6 +190,32 @@ that.
   a port of `RmEvidenceSet`'s scoring algorithm.
 - Tests cover the code in this directory only; they do not exercise the
   PHP system.
+- **Incident (2026-09-17): a live run from an unrestricted machine
+  resolved "latest episode = 1980"**, when the real value was in the
+  790s. Root cause: `sources/tvmaze.py` ran the shared, deliberately
+  permissive `normalize_episode_number()` against each embedded
+  episode's freeform `name` field and trusted whatever digit sequence
+  it found as an absolute episode number — a field with no structural
+  guarantee it represents Running Man's own canonical broadcast count
+  (unlike Wikipedia's labeled column or Fandom's `Episode/N` page-naming
+  convention). `engine.py`'s resolver compounded this by treating every
+  source's numbers as equally trustworthy, so TVmaze's coincidentally
+  real air_date (from the same freeform-title record) satisfied the
+  "confirmed aired" gate and won by raw numeric comparison over Fandom's
+  legitimate but date-less candidate.
+  **Fix:** `SourceProbeResult` now carries a self-declared
+  `canonical_episode_numbering` flag, set `True` only by Wikipedia and
+  Fandom (`registry.CANONICAL_EPISODE_SOURCES`); `engine._resolve_latest()`
+  only ever considers a source's `extracted_episode_numbers` for "latest
+  episode" when that flag is set. TVmaze no longer populates
+  `extracted_episode_numbers`/`extracted_titles`/`extracted_air_dates`
+  at all — it reports everything it can still genuinely observe (title,
+  air date, thumbnail, its own episode id/season/number) in
+  `non_canonical_episode_hints`, explicitly unkeyed by any trusted
+  episode number, so it can never be silently mistaken for canonical
+  data. See `tests/test_adapters_offline.py`'s `TvMazeAdapterTests` and
+  `tests/test_engine.py`'s `test_tvmaze_1980_vs_fandom_792_resolves_to_fandom_not_tvmaze`
+  for the regression coverage.
 
 ## 9. Why this is NOT yet a migration
 

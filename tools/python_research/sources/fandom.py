@@ -91,6 +91,11 @@ def probe() -> SourceProbeResult:
     result.extracted_episode_numbers = sorted(set(numbers))
     result.parsing_result = "ok"
     result.access_result = SourceStatus.USABLE
+    # Structurally verified: these numbers came from the wiki's own
+    # "Episode/N" page-naming convention (a strict, full-string match),
+    # not a bare digit found in unnarrowed text — see
+    # registry.CANONICAL_EPISODE_SOURCES.
+    result.canonical_episode_numbering = True
 
     latest = result.extracted_episode_numbers[-1]
     _fetch_episode_page(result, latest)
