@@ -1,0 +1,12 @@
+{
+  "_synthetic_fixture_note": "Deliberately omits Episode/700 to exercise and demonstrate the honest NOT_FOUND path (a real Fandom archive may or may not have a page for every historical episode).",
+  "query": {
+    "allpages": [
+      {"pageid": 2, "ns": 0, "title": "Episode/750"},
+      {"pageid": 3, "ns": 0, "title": "Episode/800"},
+      {"pageid": 4, "ns": 0, "title": "Episode/810"},
+      {"pageid": 5, "ns": 0, "title": "Episode/819"},
+      {"pageid": 6, "ns": 0, "title": "Episode/Guide"}
+    ]
+  }
+}

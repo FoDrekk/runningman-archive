@@ -1,0 +1,12 @@
+{
+  "_synthetic_fixture_note": "SYNTHETIC test data for the Python Research Engine benchmark — NOT real Running Man content. One entry's air_date deliberately matches the canonical episode 819 date (2026-09-13) to exercise air_date-only corroboration; none of this is ever mapped to a canonical episode number.",
+  "id": 3479,
+  "name": "Running Man",
+  "_embedded": {
+    "episodes": [
+      {"id": 501, "season": 1, "number": 640, "name": "[SYNTHETIC] TVmaze title mentioning the year 1998", "airdate": "2026-06-20", "image": {"medium": "https://example.com/640.jpg"}},
+      {"id": 502, "season": 1, "number": 641, "name": "[SYNTHETIC] Race for the grand prize of 819 dollars", "airdate": "2026-09-13", "image": {"medium": "https://example.com/641.jpg"}},
+      {"id": 503, "season": 1, "number": 642, "name": "[SYNTHETIC] Untitled Special", "airdate": null, "image": null}
+    ]
+  }
+}
