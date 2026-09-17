@@ -55,6 +55,25 @@ class SourceStatus(str, enum.Enum):
     ERROR = "error"            # an unexpected exception while probing this source
 
 
+class RobotsOutcome(str, enum.Enum):
+    """
+    What actually happened when a source's robots.txt was checked —
+    kept separate from SourceStatus/FailureType because "robots.txt
+    could not be fetched" and "robots.txt explicitly disallows this
+    URL" are NOT the same thing (see sources/base.py::check_robots_allowed()
+    and the 2026-09-17 Fandom incident: a robots.txt HTTP 403 was, before
+    this fix, silently treated as identical to an explicit disallow —
+    even though Fandom's real API endpoint returned HTTP 200).
+    """
+
+    ALLOWED = "ALLOWED"                    # explicit allow, or robots.txt absent (404) — conventionally "everything allowed"
+    DISALLOWED = "ROBOTS_DISALLOWED"       # robots.txt fetched successfully and explicitly disallows this URL — an
+                                            # ESTABLISHED rule. Always respected; the target is never attempted.
+    FETCH_FAILED = "ROBOTS_FETCH_FAILED"   # robots.txt itself could not be retrieved/parsed for ANY reason (HTTP
+                                            # error other than 404, timeout, DNS/TLS failure, ...). NO rule was
+                                            # established either way — the target endpoint may still be attempted.
+
+
 @dataclasses.dataclass
 class Evidence:
     """
@@ -123,6 +142,21 @@ class SourceProbeResult:
     # be silently treated as "episode N's data". Each dict should carry
     # its own "reason" explaining why it isn't canonical.
     non_canonical_episode_hints: list[dict] = dataclasses.field(default_factory=list)
+
+    # What actually happened to robots.txt on this attempt — one of
+    # RobotsOutcome's values, or None when robots checking was skipped
+    # entirely (respect_robots=False). Recorded regardless of whether
+    # the overall probe succeeded, for transparency (see sources/base.py).
+    robots_outcome: Optional[str] = None
+
+    # Only set for the two states that were previously ambiguous/wrong
+    # (see RobotsOutcome's docstring): "ROBOTS_DISALLOWED" (an established
+    # rule, respected — the target was never attempted), or, when
+    # robots.txt itself could not be fetched, whichever of
+    # "API_ACCESSIBLE_DESPITE_ROBOTS_FETCH_FAILURE" / "TARGET_ACCESS_FAILED"
+    # the actual target attempt resolved to. None on the ordinary
+    # ALLOWED path — that path's reporting is unchanged by this fix.
+    access_classification: Optional[str] = None
 
     def fields_provided(self) -> list[str]:
         out = []
