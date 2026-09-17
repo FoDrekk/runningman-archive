@@ -45,7 +45,7 @@ from __future__ import annotations
 from .. import config
 from ..models import FailureType, SourceProbeResult, SourceStatus
 from ..normalize import normalize_air_date, normalize_episode_number, normalize_title
-from .base import fetch_json, snippet
+from .base import annotate_robots_access, fetch_json, snippet
 
 _NON_CANONICAL_REASON = (
     "TVmaze's episode 'name' field is freeform title text, not a "
@@ -70,6 +70,7 @@ def probe() -> SourceProbeResult:
         access_result=SourceStatus.USABLE if r.ok else SourceStatus.BLOCKED,
         parsing_result="not_attempted",
     )
+    annotate_robots_access(result, r)
     if not r.ok:
         result.failure = FailureType.ACCESS_FAILURE
         result.error_detail = r.error

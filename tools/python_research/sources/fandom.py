@@ -25,7 +25,7 @@ import urllib.parse
 from .. import config
 from ..models import FailureType, SourceProbeResult, SourceStatus
 from ..normalize import normalize_air_date, normalize_episode_number, normalize_guest_name, normalize_title
-from .base import fetch_json, snippet
+from .base import annotate_robots_access, fetch_json, snippet
 from .htmlutil import extract_infobox_pairs
 
 _PAGE_PREFIX = "Episode/"
@@ -57,6 +57,7 @@ def probe() -> SourceProbeResult:
     result.request_status = "ok" if r.ok else "failed"
     result.http_status = r.http_status
     result.response_time_ms = round(r.elapsed_ms, 1)
+    annotate_robots_access(result, r)
 
     if not r.ok:
         result.failure = FailureType.ACCESS_FAILURE
