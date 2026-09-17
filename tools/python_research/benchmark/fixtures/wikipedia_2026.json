@@ -1,0 +1,9 @@
+{
+  "_synthetic_fixture_note": "SYNTHETIC test data for the Python Research Engine benchmark — NOT real Running Man content. Deliberately omits episode 800 to exercise the honest NOT_FOUND_ON_HINTED_YEAR path.",
+  "parse": {
+    "title": "List of Running Man episodes (2026)",
+    "text": {
+      "*": "<table class=\"wikitable\"><tr><th>No.</th><th>Title</th><th>Air Date</th></tr><tr><td>819</td><td>[SYNTHETIC] Wiki Title 819</td><td>September 13, 2026</td></tr><tr><td>810</td><td>[SYNTHETIC] Wiki Title 810</td><td>June 21, 2026</td></tr></table>"
+    }
+  }
+}
