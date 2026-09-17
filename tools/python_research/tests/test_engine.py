@@ -14,12 +14,23 @@ from ..engine import ResearchEngine
 from ..models import FailureType, SourceProbeResult, SourceStatus
 
 
-def _usable(source: str, eps: list[int], dates: dict[int, str] | None = None, url: str = "https://example.com") -> SourceProbeResult:
+def _usable(
+    source: str, eps: list[int], dates: dict[int, str] | None = None,
+    url: str = "https://example.com", canonical: bool | None = None,
+    non_canonical_hints: list[dict] | None = None,
+) -> SourceProbeResult:
+    # Defaults to the real adapters' own declared capability (wikipedia/
+    # fandom are canonical; everything else is not) so existing tests
+    # keep exercising realistic combinations without every call site
+    # having to know about the canonical-numbering fix.
+    if canonical is None:
+        canonical = source in ("wikipedia", "fandom")
     return SourceProbeResult(
         source=source, url=url, request_status="ok", http_status=200,
         response_time_ms=12.3, access_result=SourceStatus.USABLE,
         parsing_result="ok", extracted_episode_numbers=sorted(eps),
-        extracted_air_dates=dates or {},
+        extracted_air_dates=dates or {}, canonical_episode_numbering=canonical,
+        non_canonical_episode_hints=non_canonical_hints or [],
     )
 
 
@@ -55,7 +66,7 @@ class ResolutionTests(unittest.TestCase):
     def test_agreement_resolves_cleanly(self):
         results = {
             "wikipedia": _usable("wikipedia", [818, 819], {818: "2026-09-06", 819: "2026-09-13"}),
-            "tvmaze": _usable("tvmaze", [818, 819], {818: "2026-09-06", 819: "2026-09-13"}),
+            "fandom": _usable("fandom", [818, 819], {818: "2026-09-06", 819: "2026-09-13"}),
         }
         res = self.engine._resolve_latest(results)
         self.assertEqual(res.latest_episode, 819)
@@ -78,7 +89,7 @@ class ResolutionTests(unittest.TestCase):
         # Normal lag: sources agree within the tolerance.
         results = {
             "wikipedia": _usable("wikipedia", [819], {819: "2026-09-13"}),
-            "tvmaze": _usable("tvmaze", [817], {817: "2026-08-30"}),
+            "fandom": _usable("fandom", [817], {817: "2026-08-30"}),
         }
         res = self.engine._resolve_latest(results)
         self.assertEqual(res.latest_episode, 819)
@@ -87,10 +98,61 @@ class ResolutionTests(unittest.TestCase):
     def test_large_spread_is_a_genuine_conflict(self):
         results = {
             "wikipedia": _usable("wikipedia", [819], {819: "2026-09-13"}),
-            "tvmaze": _usable("tvmaze", [810], {810: "2026-07-01"}),
+            "fandom": _usable("fandom", [810], {810: "2026-07-01"}),
         }
         res = self.engine._resolve_latest(results)
         self.assertEqual(res.latest_episode, 819)  # still resolves to the best-supported answer
+        self.assertEqual(len(res.conflicts), 1)
+        self.assertEqual(res.conflicts[0]["type"], "RESOLUTION_CONFLICT")
+
+    def test_non_canonical_source_never_becomes_a_latest_episode_candidate(self):
+        # A source that HAS extracted_episode_numbers but has not declared
+        # canonical_episode_numbering (e.g. a hypothetically misconfigured
+        # adapter) must be excluded from resolution entirely — not merely
+        # outranked. Regression for the TVmaze=1980 incident's engine-side
+        # half of the bug.
+        results = {
+            "wikipedia": _usable("wikipedia", [819], {819: "2026-09-13"}),
+            "sbs": _usable("sbs", [9999], {9999: "2026-09-13"}, canonical=False),
+        }
+        res = self.engine._resolve_latest(results)
+        self.assertEqual(res.latest_episode, 819)
+        self.assertEqual(res.conflicts, [])
+
+    def test_tvmaze_1980_vs_fandom_792_resolves_to_fandom_not_tvmaze(self):
+        # The exact reported live-run shape: fandom finds a real canonical
+        # episode 792 (no air date confirmed yet), tvmaze's non-canonical
+        # pipeline observed a freeform-title digit sequence "1980" paired
+        # with a real air date from the same (unrelated) record. The
+        # resolver must never pick 1980 merely because a number+date pair
+        # happened to exist somewhere — TVmaze is not a candidate source
+        # at all once it stops declaring canonical_episode_numbering.
+        results = {
+            "fandom": _usable("fandom", [792], {}),  # page exists, no confirmed air date yet
+            "tvmaze": _usable(
+                "tvmaze", [], {}, canonical=False,
+                non_canonical_hints=[{
+                    "tvmaze_episode_id": 1, "title_digit_sequence": 1980,
+                    "air_date": "2012-12-02",
+                    "reason": "freeform title text, not a canonical RM count",
+                }],
+            ),
+        }
+        res = self.engine._resolve_latest(results)
+        self.assertNotEqual(res.latest_episode, 1980)
+        # fandom's 792 has no air date either -> correctly INSUFFICIENT_EVIDENCE,
+        # never a forced/guessed answer, and certainly never 1980.
+        self.assertIsNone(res.latest_episode)
+        self.assertTrue(res.insufficient_evidence)
+
+    def test_conflicting_canonical_sources_never_silently_resolve(self):
+        # Two canonical sources disagreeing materially must surface a
+        # RESOLUTION_CONFLICT, not a silent pick.
+        results = {
+            "wikipedia": _usable("wikipedia", [819], {819: "2026-09-13"}),
+            "fandom": _usable("fandom", [792], {792: "2026-01-01"}),
+        }
+        res = self.engine._resolve_latest(results)
         self.assertEqual(len(res.conflicts), 1)
         self.assertEqual(res.conflicts[0]["type"], "RESOLUTION_CONFLICT")
 
@@ -119,6 +181,7 @@ class ResolutionTests(unittest.TestCase):
                 source="fandom", url="https://example.com", request_status="ok", http_status=200,
                 response_time_ms=8.0, access_result=SourceStatus.USABLE, parsing_result="ok",
                 extracted_episode_numbers=[820],  # a page exists, but no air date confirms it aired
+                canonical_episode_numbering=True,
             ),
         }
         res = self.engine._resolve_latest(results)

@@ -23,7 +23,7 @@ import sys
 from . import config
 from .models import Evidence, FailureType, ResolutionResult, SourceProbeResult, SourceStatus, utc_now_iso
 from .normalize import normalize_air_date
-from .registry import FIELD_AUTHORITY, SourceRegistry
+from .registry import CANONICAL_EPISODE_SOURCES, FIELD_AUTHORITY, SourceRegistry
 
 CONFLICT_SPREAD_THRESHOLD = 3  # same tolerance RmLatestEpisode::detect() uses for "normal source lag"
 
@@ -94,6 +94,27 @@ class ResearchEngine:
             if r.access_result == SourceStatus.ERROR:
                 failures.append({"source": name, "type": FailureType.PARSER_FAILURE.value, "detail": r.error_detail})
                 continue
+
+            # Canonical-numbering gate (the TVmaze=1980 incident fix): a
+            # source may only contribute a candidate for "latest episode"
+            # when it explicitly declares (SourceProbeResult.canonical_
+            # episode_numbering) AND is on the reviewed allow-list
+            # (registry.CANONICAL_EPISODE_SOURCES). Anything else — even a
+            # numerically larger value — is excluded here, never compared.
+            # It still appears in the full report via source_results /
+            # non_canonical_episode_hints, just never as resolution input.
+            is_canonical = r.canonical_episode_numbering and name in CANONICAL_EPISODE_SOURCES
+            if not is_canonical:
+                has_any_data = bool(
+                    r.extracted_episode_numbers or r.non_canonical_episode_hints
+                    or r.extracted_air_dates or r.extracted_titles
+                )
+                if not has_any_data:
+                    sources_with_no_data.append(name)
+                    if r.failure:
+                        failures.append({"source": name, "type": r.failure.value, "detail": r.error_detail or "; ".join(r.warnings)})
+                continue
+
             if not r.extracted_episode_numbers:
                 sources_with_no_data.append(name)
                 if r.failure:

@@ -141,6 +141,10 @@ def probe() -> SourceProbeResult:
         result.extracted_episode_numbers = sorted(set(titles) | set(dates))
         result.parsing_result = "ok"
         result.access_result = SourceStatus.USABLE
+        # Structurally verified: these numbers came from a column whose
+        # header was explicitly matched against _EP_HEADER, not a bare
+        # digit found in unnarrowed text — see registry.CANONICAL_EPISODE_SOURCES.
+        result.canonical_episode_numbering = True
         if prior_attempts:
             result.warnings.append("Earlier year(s) tried first: " + "; ".join(prior_attempts))
         return result

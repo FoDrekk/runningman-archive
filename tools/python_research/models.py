@@ -106,6 +106,24 @@ class SourceProbeResult:
     error_detail: Optional[str] = None
     raw_snippet: Optional[str] = None   # small debug snippet only — never the full raw response
 
+    # Self-declared capability flag: True only when THIS adapter has a
+    # structurally-verified signal that its numbers are Running Man's own
+    # canonical, continuous broadcast count (an explicitly-labeled column
+    # header, or a page-naming convention tied 1:1 to that count) — never
+    # set merely because a number was extracted. See registry.py's
+    # CANONICAL_EPISODE_SOURCES and engine.py's _resolve_latest(), which
+    # refuse to treat extracted_episode_numbers from a source with this
+    # flag False as a candidate for the resolved "latest episode".
+    canonical_episode_numbering: bool = False
+
+    # For a source whose numbers are NOT canonical (e.g. tvmaze.py): the
+    # air_date/title/thumbnail/source-local-identity it can still
+    # genuinely support, reported per raw source record and explicitly
+    # NOT keyed by any trusted episode number — so nothing here can ever
+    # be silently treated as "episode N's data". Each dict should carry
+    # its own "reason" explaining why it isn't canonical.
+    non_canonical_episode_hints: list[dict] = dataclasses.field(default_factory=list)
+
     def fields_provided(self) -> list[str]:
         out = []
         if self.extracted_episode_numbers:
