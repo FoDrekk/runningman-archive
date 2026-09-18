@@ -8,15 +8,30 @@
 // public content API used by its own site; where that is
 // unreachable, the adapter falls back to parsing the programme page.
 //
+// The real per-episode listing (found by reading SBS's own front-end
+// bundle, program-front-pc-1.0.0.min.js, for the XHR call its VOD/
+// "다시보기" page actually makes — see tools/capture_source.php's
+// SBS findings) is:
+//
+//   GET https://static.apis.sbs.co.kr/play-api/1.0/sbs_contents/{fullProgramId}?offset=0&limit=N&sort=new
+//
+// returning [{contentnumber, contenttitle, broaddate, ...}, ...] —
+// matched by the NUMERIC contentnumber field, never by scraping a
+// title string for an embedded marker. {fullProgramId} (e.g.
+// "S01_V0000330171") is never hardcoded: it is read from the
+// program-api/1.0/menu/runningman endpoint's own response, since
+// that is the one thing confirmed to already be correct for this
+// show and is cheap to cache long-term.
+//
 // Deliberately defensive: SBS reorganises its endpoints periodically,
-// so several known endpoint shapes are tried in turn and a total miss
-// is reported as a PARSER WARNING (reachable but nothing extracted)
+// so this real listing is tried first and a total miss (unreachable,
+// or the episode isn't in the recent window this adapter asks for —
+// it has no per-episode endpoint, only a recent listing) falls back
+// to parsing the rendered programme page, and a total miss there is
+// reported as a PARSER WARNING (reachable but nothing extracted)
 // rather than pretending the episode has no data. Nothing here
 // overwrites an existing value on its own — the resolver and the
 // diff engine still decide that.
-//
-// Episodes are matched by the Korean episode marker "NNN회", falling
-// back to matching on the expected broadcast date.
 //
 // Fields: title_ko · air_date · synopsis · image_url · title
 // ============================================================
@@ -25,11 +40,19 @@ require_once __DIR__ . '/AbstractScraper.php';
 class SbsScraper extends RmScraper
 {
     public function name(): string { return 'sbs'; }
-    public function parserVersion(): string { return 'sbs-1.0'; }
+    public function parserVersion(): string { return 'sbs-2.0'; }
 
     public function fields(): array { return ['title_ko','air_date','synopsis','image_url','title']; }
 
-    private const PROGRAM_ID = 'S01_E01'; // placeholder key; endpoints below carry the real slug
+    private const MENU_URL = 'https://static.apis.sbs.co.kr/program-api/1.0/menu/runningman';
+
+    // How far back (in recent episodes) a single sbs_contents call looks.
+    // SBS has no per-episode endpoint, only a recent listing — this is a
+    // window, not a guarantee, exactly like the rendered-page fallback
+    // below always was. 30 covers roughly 30 weeks of a weekly show,
+    // comfortably more than any realistic gap between scrape runs.
+    private const CONTENTS_WINDOW = 30;
+
     private const PAGE_URLS = [
         'https://programs.sbs.co.kr/enter/runningman/visualboard/54666',
         'https://programs.sbs.co.kr/enter/runningman',
@@ -40,6 +63,23 @@ class SbsScraper extends RmScraper
         $t0 = microtime(true);
         $reached = false; $lastErr = null; $lastClass = null; $lastUrl = self::PAGE_URLS[0];
         $lastHtml = null; $lastHtmlUrl = null;
+
+        $fullProgramId = $this->resolveFullProgramId($ctx);
+        if ($fullProgramId !== null) {
+            $url = self::contentsUrl($fullProgramId, 0, self::CONTENTS_WINDOW);
+            [$data, $res] = $this->getJson($url, [
+                'timeout' => 15, 'cache_ttl' => RmCache::episodeTtl($epNum, $ctx['latest'] ?? null, 'api'),
+                'cache_key' => 'sbs:api:contents:' . md5($fullProgramId), 'cache_type' => 'api',
+                'bypass_cache' => !empty($ctx['bypass_cache']), 'retries' => 1,
+            ]);
+            if ($res->ok) {
+                $reached = true;
+                $found = is_array($data) ? $this->fromContentsList($data, $epNum) : null;
+                if ($found) return $this->result($found, $url, $res);
+            } else {
+                $lastErr = $res->error; $lastClass = $res->errorClass; $lastUrl = $url;
+            }
+        }
 
         foreach ($this->candidateSources($epNum, $ctx) as $cand) {
             $lastUrl = $cand['url'];
@@ -87,22 +127,87 @@ class SbsScraper extends RmScraper
             ['_ms' => $ms, '_error_class' => $lastClass ?? RmHttpClient::CLASS_OTHER]);
     }
 
-    /** Endpoint shapes tried in order — API first, rendered page last. */
+    /**
+     * The highest contentnumber SBS's own listing currently reports —
+     * real signal, not the "no external source could report a latest
+     * episode" gap this adapter used to leave entirely to Wikipedia/
+     * KoWikipedia. Same sanity clamp RmLatestEpisode::detect() itself
+     * applies to every source's signal.
+     */
+    public function latestEpisode(): ?int
+    {
+        $fullProgramId = $this->resolveFullProgramId([]);
+        if ($fullProgramId === null) return null;
+        [$data, $res] = $this->getJson(self::contentsUrl($fullProgramId, 0, 1), [
+            'timeout' => 10, 'cache_ttl' => 900, 'cache_key' => 'sbs:api:latest',
+            'cache_type' => 'api', 'retries' => 1,
+        ]);
+        if (!$res->ok || !is_array($data) || empty($data[0]['contentnumber'])) return null;
+        $n = (int)$data[0]['contentnumber'];
+        return ($n > 0 && $n < 2000) ? $n : null;
+    }
+
+    private static function contentsUrl(string $fullProgramId, int $offset, int $limit): string
+    {
+        return 'https://static.apis.sbs.co.kr/play-api/1.0/sbs_contents/' . rawurlencode($fullProgramId)
+             . '?' . http_build_query(['offset' => $offset, 'limit' => $limit, 'sort' => 'new']);
+    }
+
+    /**
+     * {fullProgramId} (e.g. "S01_V0000330171") for the real content-list
+     * endpoint, read from program-api/1.0/menu/runningman's own response
+     * rather than hardcoded — it is show-specific infrastructure detail,
+     * not something to guess or freeze into a constant. Cached for 6
+     * hours: this practically never changes, so there is no reason to
+     * spend a request on it for every single episode lookup.
+     */
+    private function resolveFullProgramId(array $ctx): ?string
+    {
+        [$data, $res] = $this->getJson(self::MENU_URL, [
+            'timeout' => 15, 'cache_ttl' => 21600, 'cache_key' => 'sbs:api:menu',
+            'cache_type' => 'api', 'bypass_cache' => !empty($ctx['bypass_cache']), 'retries' => 1,
+        ]);
+        if (!$res->ok || !is_array($data)) return null;
+        $id = $data['program']['fullprogramid'] ?? null;
+        return (is_string($id) && $id !== '') ? $id : null;
+    }
+
+    /**
+     * Match this episode's record directly by its NUMERIC contentnumber
+     * field — the real listing needs no title-marker guessing at all,
+     * unlike fromApi()/fromHtml() below (kept for the page-scraping
+     * fallback, whose sources have no such reliable numeric field).
+     */
+    private function fromContentsList(array $data, int $epNum): ?array
+    {
+        $record = null;
+        foreach ($data as $item) {
+            if (is_array($item) && (int)($item['contentnumber'] ?? 0) === $epNum) { $record = $item; break; }
+        }
+        if ($record === null) return null;
+
+        $out = [];
+        if (!empty($record['contenttitle']) && is_string($record['contenttitle'])) {
+            $ko = RmNormalizer::text($record['contenttitle']);
+            if ($ko !== null && mb_strlen($ko) > 1) $out['title_ko'] = $ko;
+        }
+        if (!empty($record['broaddate']) && is_string($record['broaddate'])) {
+            // "2026-07-26T18:10:00.000Z" — RmNormalizer::date() does not
+            // parse the time/zone suffix, and doesn't need to; only the
+            // date portion is ever stored.
+            $d = RmNormalizer::date(explode('T', $record['broaddate'])[0]);
+            if ($d) $out['air_date'] = $d;
+        }
+        return $out ?: null;
+    }
+
+    /** Endpoint shapes tried as a FALLBACK once the real listing above misses or is unreachable. */
     private function candidateSources(int $epNum, array $ctx): array
     {
         $ttl = RmCache::episodeTtl($epNum, $ctx['latest'] ?? null, 'api');
         $bypass = !empty($ctx['bypass_cache']);
         $out = [];
 
-        foreach ([
-            'https://static.apis.sbs.co.kr/program-api/1.0/menu/runningman',
-            'https://static.apis.sbs.co.kr/program-api/1.0/board/runningman/vod',
-        ] as $u) {
-            $out[] = ['type'=>'json','url'=>$u,'opt'=>[
-                'timeout'=>15,'cache_ttl'=>$ttl,'cache_key'=>'sbs:api:'.md5($u),
-                'cache_type'=>'api','bypass_cache'=>$bypass,'retries'=>1,
-            ]];
-        }
         foreach (self::PAGE_URLS as $u) {
             $out[] = ['type'=>'html','url'=>$u,'opt'=>[
                 'timeout'=>15,'min_bytes'=>1000,'cache_ttl'=>max(900, (int)($ttl / 4)),
