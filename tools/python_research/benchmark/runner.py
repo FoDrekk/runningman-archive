@@ -1,8 +1,11 @@
 """
-benchmark/runner.py — orchestrates the fixed-sample benchmark.
+benchmark/runner.py — orchestrates the benchmark.
 
 Two passes:
-  1. Per-episode targeted probing (probes.py) for the 5 sample episodes,
+  1. Per-episode targeted probing (probes.py) for a historical sample
+     selected from episode numbers Fandom actually discovers THIS run
+     (episodes.build_dynamic_samples() — see its and episodes.py's
+     module docstring for why this is no longer a hardcoded list),
      against Fandom/Wikipedia directly, plus TVmaze/SBS reference probes
      (their real, unmodified whole-show/current-page probe()) used only
      for non-canonical corroboration/applicability — never for canonical
@@ -17,18 +20,39 @@ and README.md's "Fixture vs live mode".
 """
 from __future__ import annotations
 
+import dataclasses
 import platform
 import sys
 import time
 from unittest.mock import patch
 
 from ..engine import ResearchEngine
-from ..models import utc_now_iso
+from ..models import SourceProbeResult, utc_now_iso
 from ..registry import CANONICAL_EPISODE_SOURCES
 from . import episodes, probes
 from .fixture_transport import FixtureTransport
 
 _URLOPEN_TARGET = "tools.python_research.sources.base.urllib.request.urlopen"
+
+
+def _year_from_fandom(fandom_result: SourceProbeResult | None, ep_num: int) -> int | None:
+    """
+    Derives a Wikipedia year-page hint for `ep_num` from Fandom's OWN
+    extracted air_date for that same episode (real, sourced data from
+    this run) — never a hardcoded/guessed table. Returns None when
+    Fandom has no air_date for it (e.g. its page doesn't exist, or has
+    no confirmed air-date field), which probe_wikipedia_sample reports
+    as an honest "not probed", not a guess.
+    """
+    if fandom_result is None:
+        return None
+    air_date = fandom_result.extracted_air_dates.get(ep_num)
+    if not air_date:
+        return None
+    try:
+        return int(str(air_date)[:4])
+    except ValueError:
+        return None
 
 
 class BenchmarkRunner:
@@ -38,16 +62,44 @@ class BenchmarkRunner:
         self.mode = mode
 
     def run(self) -> dict:
-        samples = episodes.sample()
         patcher = patch(_URLOPEN_TARGET, FixtureTransport()) if self.mode == "fixture" else None
         if patcher:
             patcher.start()
         try:
             timings: dict[str, float] = {}
 
+            # Historical sample selection: discover what actually exists on
+            # Fandom THIS run, then select the sample from that real pool —
+            # never from a hardcoded guess (see episodes.py's module
+            # docstring for why the old fixed sample silently went stale).
             t0 = time.monotonic()
-            fandom_by_ep = probes.probe_fandom_sample(samples)
+            discovery = probes.discover_fandom_canonical_numbers()
+            _, discovered_numbers = discovery
+            samples = episodes.build_dynamic_samples(discovered_numbers)
+            fandom_by_ep = probes.probe_fandom_sample(samples, discovery=discovery)
             timings["fandom_sample_ms"] = round((time.monotonic() - t0) * 1000, 1)
+
+            sample_selection = {
+                "requested_size": episodes.DEFAULT_SAMPLE_SIZE,
+                "candidate_pool_size": len(discovered_numbers),
+                "actual_size": len(samples),
+                "reduced": len(samples) < episodes.DEFAULT_SAMPLE_SIZE,
+                "current_episode": (discovered_numbers[-1] if discovered_numbers else None),
+                "candidate_source": "fandom allpages listing (this run)",
+            }
+
+            # Wikipedia has no searchable absolute-episode-number index, so
+            # a per-episode year hint is required to know which year page
+            # to ask for. That hint is derived from FANDOM'S OWN extracted
+            # air_date for the same episode (real, sourced data from this
+            # very run) — never a hardcoded/guessed table, which cannot
+            # cover episode numbers it did not anticipate. An episode
+            # Fandom couldn't date is left with no hint and is honestly
+            # reported as not probed by probe_wikipedia_sample.
+            samples = [
+                dataclasses.replace(s, wikipedia_year_hint=_year_from_fandom(fandom_by_ep.get(s.number), s.number))
+                for s in samples
+            ]
 
             t0 = time.monotonic()
             wikipedia_by_ep = probes.probe_wikipedia_sample(samples)
@@ -95,7 +147,8 @@ class BenchmarkRunner:
                 "python_version": sys.version.split()[0],
                 "platform": platform.platform(),
             },
-            "sample_episodes": episodes.SAMPLE_EPISODES,
+            "sample_episodes": sorted(s.number for s in samples),
+            "sample_selection": sample_selection,
             "canonical_episode_sources": sorted(CANONICAL_EPISODE_SOURCES),
             "timings": timings,
             "per_episode": per_episode,

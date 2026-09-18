@@ -30,6 +30,18 @@ from .htmlutil import extract_infobox_pairs
 
 _PAGE_PREFIX = "Episode/"
 
+# Matches this infobox's air-date LABEL only (never page-wide text — see
+# extract_infobox_pairs(), which already scopes every (label, value)
+# pair to one portable-infobox pi-item). "air date"/"broadcast"/
+# "original air" are substring matches (existing behavior, unchanged).
+# "date" is matched EXACTLY (^date$, not a substring) — older episode
+# pages (confirmed live: Episode/385, /400, /514) label this field just
+# "Date", but a substring match on "date" would also catch an unrelated
+# infobox label like "Filming Date" or "Release Date" were one ever
+# added; requiring the bare, exact label keeps this targeted to the
+# one confirmed real-world convention instead of guessing at others.
+_AIR_DATE_LABEL_RE = re.compile(r"^date$|air.?date|broadcast|original air")
+
 
 def _allpages_url() -> str:
     return f"{config.FANDOM_BASE}/api.php?" + urllib.parse.urlencode({
@@ -127,7 +139,7 @@ def _fetch_episode_page(result: SourceProbeResult, ep_num: int) -> None:
 
     for label, value_text, value_links in pairs:
         low = label.lower()
-        if re.search(r"air.?date|broadcast|original air", low):
+        if _AIR_DATE_LABEL_RE.search(low):
             d = normalize_air_date(value_text)
             if d:
                 result.extracted_air_dates[ep_num] = d
