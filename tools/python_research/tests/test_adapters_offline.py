@@ -14,7 +14,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from ..models import FailureType, SourceStatus
+from ..models import FailureType, SourceProbeResult, SourceStatus
 from ..sources.base import FetchResult
 from ..sources import fandom, sbs, tvmaze, wikipedia
 
@@ -224,6 +224,95 @@ class FandomAdapterTests(unittest.TestCase):
         with patch("tools.python_research.sources.fandom.fetch_json", return_value=(_ok({"nope": True}), {"nope": True})):
             r = fandom.probe()
         self.assertEqual(r.failure, FailureType.PARSER_FAILURE)
+
+
+def _fandom_episode_page(ep_num: int, infobox_items_html: str, outside_infobox_html: str = "") -> dict:
+    """
+    Builds a synthetic action=parse response for Episode/<ep_num>, with
+    `infobox_items_html` (one or more `<div class="pi-item pi-data">`
+    blocks) inside the portable-infobox and, optionally,
+    `outside_infobox_html` placed OUTSIDE it — for asserting that
+    date-like text there is never mistaken for the air date.
+    """
+    return {
+        "parse": {
+            "title": f"Episode/{ep_num}",
+            "text": {
+                "*": (
+                    f'<aside class="portable-infobox">{infobox_items_html}</aside>'
+                    f"{outside_infobox_html}"
+                ),
+            },
+        },
+    }
+
+
+def _pi_item(label: str, value_html: str) -> str:
+    return (
+        f'<div class="pi-item pi-data"><h3 class="pi-data-label">{label}</h3>'
+        f'<div class="pi-data-value">{value_html}</div></div>'
+    )
+
+
+class FandomAirDateLabelTests(unittest.TestCase):
+    """
+    Regression coverage for the bare "Date" infobox label (older episode
+    pages — confirmed live on Episode/385, /400, /514) alongside the
+    pre-existing "Air Date"/"Broadcast"/"Original Air" labels, and for
+    the fact this must stay scoped to an exact, infobox-only label match
+    — never a page-wide or substring "date" match that could pick up an
+    unrelated field or unrelated page text.
+    """
+
+    @staticmethod
+    def _extract(ep_num: int, infobox_items_html: str, outside_infobox_html: str = "") -> dict:
+        fixture = _fandom_episode_page(ep_num, infobox_items_html, outside_infobox_html)
+        result = SourceProbeResult(
+            source="fandom", url="https://example.invalid", request_status="ok",
+            http_status=200, response_time_ms=0.0, access_result=SourceStatus.USABLE,
+            parsing_result="ok", extracted_episode_numbers=[ep_num], canonical_episode_numbering=True,
+        )
+        with patch("tools.python_research.sources.fandom.fetch_json", return_value=(_ok(fixture), fixture)):
+            fandom._fetch_episode_page(result, ep_num)
+        return result.extracted_air_dates
+
+    def test_bare_date_label_is_recognized(self):
+        dates = self._extract(999, _pi_item("Date", "January 14, 2018"))
+        self.assertEqual(dates.get(999), "2018-01-14")
+
+    def test_confirmed_real_examples_385_400_514(self):
+        self.assertEqual(self._extract(385, _pi_item("Date", "January 14, 2018")).get(385), "2018-01-14")
+        self.assertEqual(self._extract(400, _pi_item("Date", "May 13, 2018")).get(400), "2018-05-13")
+        self.assertEqual(self._extract(514, _pi_item("Date", "August 2, 2020")).get(514), "2020-08-02")
+
+    def test_air_date_label_still_recognized(self):
+        dates = self._extract(1, _pi_item("Air Date", "September 13, 2026"))
+        self.assertEqual(dates.get(1), "2026-09-13")
+
+    def test_broadcast_label_still_recognized(self):
+        dates = self._extract(2, _pi_item("Broadcast", "September 13, 2026"))
+        self.assertEqual(dates.get(2), "2026-09-13")
+
+    def test_original_air_label_still_recognized(self):
+        dates = self._extract(3, _pi_item("Original Air", "September 13, 2026"))
+        self.assertEqual(dates.get(3), "2026-09-13")
+
+    def test_unrelated_infobox_label_containing_date_substring_is_not_captured(self):
+        # A label that merely CONTAINS "date" (but is not the exact bare
+        # "Date" label, nor "Air Date"/"Broadcast"/"Original Air") must
+        # never be treated as the air date — the fix is an exact match
+        # for the bare label, not a broad substring match.
+        dates = self._extract(4, _pi_item("Filming Date", "January 1, 2020"))
+        self.assertNotIn(4, dates)
+
+    def test_date_like_text_outside_the_infobox_is_never_captured(self):
+        # extract_infobox_pairs() only ever yields pairs from inside the
+        # portable-infobox, so page-body text can never reach the label
+        # regex at all — asserted explicitly as its own regression case.
+        outside = "<p>This episode was originally scheduled for January 1, 2099 but was delayed.</p>"
+        dates = self._extract(5, _pi_item("Air Date", "September 13, 2026"), outside_infobox_html=outside)
+        self.assertEqual(dates.get(5), "2026-09-13")
+        self.assertNotIn("2099-01-01", dates.values())
 
 
 class WikipediaAdapterTests(unittest.TestCase):

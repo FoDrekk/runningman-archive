@@ -6,10 +6,139 @@ readable Markdown report answering the benchmark's 9 questions (A-I).
 UNSUPPORTED fields are reported explicitly, never silently omitted —
 e.g. NO current adapter extracts location or team/result data at all;
 the report says so directly rather than leaving a blank.
+
+Environment notes (build_environment_notes(), below) are generated from
+THIS run's own observed per-source classifications
+(aggregate_engine_report.source_results — real, unmodified engine.py
+output, only read here, never modified) rather than trusting engine.py's
+own embedded environment.note. That embedded note is a static, generic
+description of the build container and can be stale for a given run
+(e.g. it may claim every source is sandbox-blocked when this run's own
+source_results show some of them succeeded) — see README.md's
+"Environment notes are observational" section.
 """
 from __future__ import annotations
 
 SOURCES = ("fandom", "wikipedia", "tvmaze", "sbs")
+
+# The distinct, mutually-informative facts a single source's access
+# attempt can show. robots_fetch_failed is reported alongside, not as
+# one of these, because (per the 2026-09-17 Fandom incident) a source
+# can fail its robots.txt fetch and still succeed at the actual target.
+ROBOTS_DISALLOWED = "ROBOTS_DISALLOWED"                # source-side robots disallow
+SUCCESSFUL_ACCESS = "SUCCESSFUL_ACCESS"                # successful access
+SOURCE_EMPTY_CLASSIFICATION = "SOURCE_EMPTY"           # source empty / no relevant data
+TARGET_TIMEOUT = "TARGET_TIMEOUT"                      # target timeout
+TARGET_HTTP_FAILURE = "TARGET_HTTP_FAILURE"            # target HTTP failure
+TARGET_NETWORK_FAILURE = "TARGET_NETWORK_FAILURE"      # target failure with no HTTP status at all (DNS/TLS/connection)
+PARSER_FAILURE_CLASSIFICATION = "PARSER_FAILURE"
+NOT_ATTEMPTED_CLASSIFICATION = "NOT_ATTEMPTED"
+
+
+def _classify_source_access(sr: dict) -> dict:
+    """
+    Classifies ONE source_results[*] record into what THIS run actually
+    observed happening to it — never a static assumption about the
+    execution environment. Two independent facts are captured, because
+    they are not the same thing: whether robots.txt itself could be
+    fetched (robots_fetch_failed), and what happened to the actual
+    target request (target_classification) — a source can fail the
+    first and still succeed at the second (see sources/base.py's
+    check_robots_allowed() docstring for the incident this distinction
+    fixed).
+    """
+    robots_outcome = sr.get("robots_outcome")
+    request_status = sr.get("request_status")
+    failure = sr.get("failure")
+    error_detail = sr.get("error_detail") or ""
+    http_status = sr.get("http_status")
+
+    if sr.get("access_classification") == ROBOTS_DISALLOWED or robots_outcome == ROBOTS_DISALLOWED:
+        target_classification = ROBOTS_DISALLOWED
+        note = "blocked by an explicit robots.txt disallow (a source-side policy, observed this run — not an assumption about this environment)"
+    elif request_status == "not_attempted":
+        target_classification = NOT_ATTEMPTED_CLASSIFICATION
+        note = "not attempted"
+    elif request_status == "ok":
+        if failure == "SOURCE_EMPTY" or sr.get("parsing_result") == "no_relevant_data":
+            target_classification = SOURCE_EMPTY_CLASSIFICATION
+            note = f"reached (HTTP {http_status}) but returned no relevant data"
+        elif failure == "PARSER_FAILURE":
+            target_classification = PARSER_FAILURE_CLASSIFICATION
+            note = f"reached (HTTP {http_status}) but the response could not be parsed"
+        else:
+            target_classification = SUCCESSFUL_ACCESS
+            note = f"reached and usable (HTTP {http_status})"
+    else:  # request_status == "failed"
+        if "timeout" in error_detail.lower() or "timed out" in error_detail.lower():
+            target_classification = TARGET_TIMEOUT
+            note = f"the target request timed out ({error_detail})" if error_detail else "the target request timed out"
+        elif http_status:
+            target_classification = TARGET_HTTP_FAILURE
+            note = f"the target request failed with HTTP {http_status}"
+        else:
+            target_classification = TARGET_NETWORK_FAILURE
+            note = f"the target request failed ({error_detail})" if error_detail else "the target request failed, with no HTTP response at all"
+
+    robots_fetch_failed = robots_outcome == "ROBOTS_FETCH_FAILED"
+    if robots_fetch_failed and target_classification == SUCCESSFUL_ACCESS:
+        note += "; robots.txt itself could not be fetched, so no rule was established — the target was attempted directly anyway"
+
+    return {
+        "target_classification": target_classification,
+        "robots_outcome": robots_outcome,
+        "robots_fetch_failed": robots_fetch_failed,
+        "note": note,
+    }
+
+
+def build_environment_notes(result: dict) -> dict:
+    """
+    Generates this run's own environment notes from
+    aggregate_engine_report.source_results — the real, unmodified
+    engine.py output — instead of relying on engine.py's embedded,
+    static environment.note (which describes the build container in
+    generic terms and does not vary per source or per run; see
+    engine.py's own `run()`, which this benchmark never modifies).
+
+    Flags a mismatch when that static note claims a blanket
+    environment-level block ("sandbox"/"egress"/"allow-list") but this
+    run's own observed classifications show at least one source
+    actually succeeded or reached-but-empty — the precise situation a
+    live run like this one can produce, and exactly what the static
+    text must never be read as ruling out.
+    """
+    source_results = result["aggregate_engine_report"]["source_results"]
+    per_source = {name: _classify_source_access(sr) for name, sr in source_results.items()}
+
+    summary_line = "; ".join(f"{name}: {info['note']}" for name, info in sorted(per_source.items()))
+
+    static_note = (result["aggregate_engine_report"].get("environment") or {}).get("note") or ""
+    claims_blanket_block = any(kw in static_note.lower() for kw in ("sandbox", "egress", "allow-list", "allow list"))
+    any_source_reached = any(
+        info["target_classification"] in (SUCCESSFUL_ACCESS, SOURCE_EMPTY_CLASSIFICATION, PARSER_FAILURE_CLASSIFICATION)
+        for info in per_source.values()
+    )
+    stale_note_mismatch = claims_blanket_block and any_source_reached
+
+    return {
+        "generated_from": "aggregate_engine_report.source_results (this run's own observed classifications)",
+        "per_source": per_source,
+        "summary": summary_line,
+        "static_engine_note_mismatch": stale_note_mismatch,
+        "note_on_static_engine_note": (
+            "aggregate_engine_report.environment.note is a static, generic description of the build "
+            "container (unmodified engine.py output) and does NOT reflect this specific run's per-source "
+            "outcome — this run observed at least one source actually reach its target (see per_source "
+            "above), contradicting that static claim. Trust environment_notes.per_source, not the static "
+            "note, for what actually happened this run."
+            if stale_note_mismatch else
+            "aggregate_engine_report.environment.note is a static, generic description of the build "
+            "container (unmodified engine.py output); this run's observed per-source outcomes are in "
+            "per_source above."
+        ),
+    }
+
 
 # Per Phase 18's field list. "location"/"team_result" have NO current
 # adapter support at all (see sources/*.py — none populates
@@ -96,6 +225,7 @@ def summarize(result: dict) -> dict:
         },
         "failure_classification_tally": failure_tally,
         "timings": result["timings"],
+        "environment_notes": build_environment_notes(result),
     }
 
 
@@ -109,8 +239,36 @@ def render_markdown(result: dict, summary: dict) -> str:
     w(f"**{mode_banner}** — {result['mode_note']}")
     w("")
     w(f"Generated: {result['timestamp']}")
+    sel = result.get("sample_selection") or {}
     w(f"Sample episodes: {', '.join(str(n) for n in result['sample_episodes'])}")
+    if sel:
+        reduced_note = (
+            f" — fewer than the requested {sel['requested_size']} were available "
+            f"(candidate pool from Fandom this run had only {sel['candidate_pool_size']})"
+            if sel.get("reduced") else ""
+        )
+        w(f"Selected from {sel['candidate_pool_size']} episode number(s) Fandom's own allpages listing "
+          f"actually reported THIS run (never a hardcoded guess); requested {sel['requested_size']}, "
+          f"got {sel['actual_size']}{reduced_note}. Current-episode probe: "
+          f"{sel.get('current_episode') if sel.get('current_episode') is not None else '—'}.")
     w(f"Canonical episode-number sources (unchanged by this benchmark): {', '.join(result['canonical_episode_sources'])}")
+    w("")
+
+    w("## Environment notes (observed this run)")
+    w("")
+    w("Generated from this run's own observed per-source classifications "
+      "(`aggregate_engine_report.source_results`), never from a static assumption about this environment. "
+      "A source is only ever described as blocked-by-this-environment when this run's own data actually "
+      "shows that — a real site-side robots disallow, a single source's timeout, or a source that returned "
+      "no relevant data are each reported as exactly that, never folded into a generic sandbox claim.")
+    w("")
+    env_notes = summary["environment_notes"]
+    w("| Source | Classification | Robots fetch failed | Note |")
+    w("|---|---|---|---|")
+    for src, info in sorted(env_notes["per_source"].items()):
+        w(f"| {src} | {info['target_classification']} | {'yes' if info['robots_fetch_failed'] else 'no'} | {info['note']} |")
+    w("")
+    w(env_notes["note_on_static_engine_note"])
     w("")
 
     w("## 1-8: Per-source accessibility and field coverage")

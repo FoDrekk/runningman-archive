@@ -24,15 +24,19 @@ NOT_APPLICABLE = "NOT_APPLICABLE"
 NOT_FOUND = "NOT_FOUND"
 
 
-def probe_fandom_sample(samples: list[EpisodeSample]) -> dict[int, SourceProbeResult]:
+def discover_fandom_canonical_numbers() -> tuple[SourceProbeResult, list[int]]:
     """
-    Reuses fandom._allpages_url()/_parse_url() and, critically,
-    fandom._fetch_episode_page() UNMODIFIED for the actual field
-    extraction (title/air_date/guests) — the exact same tested logic
-    the real adapter uses for "the latest episode", just pointed at
-    each sample number instead. The allpages listing is fetched ONCE
-    for the whole sample (matching the real adapter's one-call-per-run
-    cost), not once per episode.
+    Fetches Fandom's allpages listing exactly ONCE and returns (a) the
+    raw SourceProbeResult for that listing request and (b) the sorted
+    canonical episode numbers it actually discovered (empty when the
+    listing itself failed, or parsed but yielded no "Episode/N" pages).
+
+    This is the single source of truth for "what episode numbers exist
+    on Fandom THIS run" — used both to select the historical sample
+    (episodes.build_dynamic_samples()) and, below, to check per-episode
+    existence before probing. Nothing here is invented: an episode
+    number is only ever considered "discovered" if it came from this
+    exact listing response.
     """
     list_url = fandom._allpages_url()
     listing = SourceProbeResult(
@@ -46,25 +50,17 @@ def probe_fandom_sample(samples: list[EpisodeSample]) -> dict[int, SourceProbeRe
     listing.response_time_ms = round(r.elapsed_ms, 1)
     annotate_robots_access(listing, r)
 
-    out: dict[int, SourceProbeResult] = {}
-
     if not r.ok:
-        # The listing itself failed -> every sample episode shares that
-        # SAME access failure; none can be individually checked.
         listing.failure = FailureType.ACCESS_FAILURE
         listing.error_detail = r.error
-        for s in samples:
-            out[s.number] = listing
-        return out
+        return listing, []
 
     if not isinstance(data, dict) or "query" not in data:
         listing.parsing_result = "parse_error"
         listing.failure = FailureType.PARSER_FAILURE
         listing.error_detail = "Response missing expected 'query' envelope"
         listing.access_result = SourceStatus.REACHABLE
-        for s in samples:
-            out[s.number] = listing
-        return out
+        return listing, []
 
     pages = (data.get("query") or {}).get("allpages") or []
     existing_numbers: set[int] = set()
@@ -72,6 +68,49 @@ def probe_fandom_sample(samples: list[EpisodeSample]) -> dict[int, SourceProbeRe
         m = re.match(rf"^{re.escape(fandom._PAGE_PREFIX)}(\d+)$", str(p.get("title") or ""))
         if m:
             existing_numbers.add(int(m.group(1)))
+
+    if not existing_numbers:
+        listing.parsing_result = "no_relevant_data"
+        listing.failure = FailureType.SOURCE_EMPTY
+        listing.access_result = SourceStatus.REACHABLE
+        return listing, []
+
+    listing.extracted_episode_numbers = sorted(existing_numbers)
+    listing.parsing_result = "ok"
+    listing.access_result = SourceStatus.USABLE
+    listing.canonical_episode_numbering = True
+    return listing, sorted(existing_numbers)
+
+
+def probe_fandom_sample(
+    samples: list[EpisodeSample],
+    discovery: tuple[SourceProbeResult, list[int]] | None = None,
+) -> dict[int, SourceProbeResult]:
+    """
+    Reuses fandom._allpages_url()/_parse_url() and, critically,
+    fandom._fetch_episode_page() UNMODIFIED for the actual field
+    extraction (title/air_date/guests) — the exact same tested logic
+    the real adapter uses for "the latest episode", just pointed at
+    each sample number instead. The allpages listing is fetched ONCE
+    for the whole sample (matching the real adapter's one-call-per-run
+    cost), not once per episode.
+
+    `discovery` lets a caller (runner.py) pass in an already-fetched
+    discover_fandom_canonical_numbers() result so the listing is never
+    fetched twice in one run; when omitted (as every existing caller/
+    test does), the listing is fetched here, same as before.
+    """
+    listing, discovered_numbers = discovery if discovery is not None else discover_fandom_canonical_numbers()
+    existing_numbers = set(discovered_numbers)
+
+    out: dict[int, SourceProbeResult] = {}
+
+    if listing.failure in (FailureType.ACCESS_FAILURE, FailureType.PARSER_FAILURE):
+        # The listing itself failed -> every sample episode shares that
+        # SAME access failure; none can be individually checked.
+        for s in samples:
+            out[s.number] = listing
+        return out
 
     for s in samples:
         n = s.number
@@ -105,10 +144,28 @@ def probe_wikipedia_sample(samples: list[EpisodeSample]) -> dict[int, SourceProb
     DISTINCT hinted year is fetched only ONCE for the whole sample
     (e.g. episodes 800/810/819 all hint 2026 -> one request), then every
     sample episode's presence in that year's extracted tables is checked.
+
+    A sample with wikipedia_year_hint=None (runner.py could not derive
+    one from Fandom's own air_date for that episode — see episodes.py's
+    module docstring) is never fetched: there is no real, sourced year
+    to ask Wikipedia for, and guessing one would misreport a benchmark
+    limitation as a Wikipedia coverage gap. It is reported honestly as
+    not attempted instead.
     """
     out: dict[int, SourceProbeResult] = {}
     by_year: dict[int, list[EpisodeSample]] = {}
     for s in samples:
+        if s.wikipedia_year_hint is None:
+            out[s.number] = SourceProbeResult(
+                source="wikipedia", url="", request_status="not_attempted",
+                http_status=None, response_time_ms=0.0,
+                access_result=SourceStatus.BLOCKED, parsing_result="not_attempted",
+                warnings=[f"No wikipedia_year_hint available for episode {s.number} — Fandom (this run's "
+                          f"only source of a real air_date for it) did not provide one, and Wikipedia has "
+                          f"no searchable absolute-episode-number index, so no year page was requested "
+                          f"rather than guessing one."],
+            )
+            continue
         by_year.setdefault(s.wikipedia_year_hint, []).append(s)
 
     for year, year_samples in by_year.items():
