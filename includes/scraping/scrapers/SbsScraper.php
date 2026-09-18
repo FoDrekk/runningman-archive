@@ -70,7 +70,7 @@ class SbsScraper extends RmScraper
             [$data, $res] = $this->getJson($url, [
                 'timeout' => 15, 'cache_ttl' => RmCache::episodeTtl($epNum, $ctx['latest'] ?? null, 'api'),
                 'cache_key' => 'sbs:api:contents:' . md5($fullProgramId), 'cache_type' => 'api',
-                'bypass_cache' => !empty($ctx['bypass_cache']), 'retries' => 1,
+                'bypass_cache' => !empty($ctx['bypass_cache']), 'retries' => 3,
             ]);
             if ($res->ok) {
                 $reached = true;
@@ -140,7 +140,7 @@ class SbsScraper extends RmScraper
         if ($fullProgramId === null) return null;
         [$data, $res] = $this->getJson(self::contentsUrl($fullProgramId, 0, 1), [
             'timeout' => 10, 'cache_ttl' => 900, 'cache_key' => 'sbs:api:latest',
-            'cache_type' => 'api', 'retries' => 1,
+            'cache_type' => 'api', 'retries' => 3,
         ]);
         if (!$res->ok || !is_array($data) || empty($data[0]['contentnumber'])) return null;
         $n = (int)$data[0]['contentnumber'];
@@ -165,7 +165,7 @@ class SbsScraper extends RmScraper
     {
         [$data, $res] = $this->getJson(self::MENU_URL, [
             'timeout' => 15, 'cache_ttl' => 21600, 'cache_key' => 'sbs:api:menu',
-            'cache_type' => 'api', 'bypass_cache' => !empty($ctx['bypass_cache']), 'retries' => 1,
+            'cache_type' => 'api', 'bypass_cache' => !empty($ctx['bypass_cache']), 'retries' => 3,
         ]);
         if (!$res->ok || !is_array($data)) return null;
         $id = $data['program']['fullprogramid'] ?? null;

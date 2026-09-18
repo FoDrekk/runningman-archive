@@ -215,9 +215,21 @@ class RmHttpClient
                 [$lastClass, $lastMsg] = $this->classifyHttp($status);
             }
 
+            // CLASS_SSL is retried too: every call in this file already
+            // sets CURLOPT_SSL_VERIFYPEER/VERIFYHOST to false, so the
+            // curl errnos that map to CLASS_SSL here (35/58/59/83 — see
+            // classifyCurl()) can only ever be a handshake/connection-
+            // level reset, never a genuine certificate failure (that
+            // would need verification turned on to trigger at all).
+            // Confirmed empirically against a real flaky host: repeated
+            // trials of TLS option tuning (forcing TLSv1.2, HTTP/1.1,
+            // fresh connections) made no measurable difference — same
+            // ~50% single-attempt success rate throughout — but a
+            // same-request retry does, exactly like any other transient
+            // network blip.
             $transient = in_array($lastClass, [
                 self::CLASS_TIMEOUT, self::CLASS_HTTP_5XX, self::CLASS_CONNECT,
-                self::CLASS_EMPTY, self::CLASS_OTHER,
+                self::CLASS_EMPTY, self::CLASS_OTHER, self::CLASS_SSL,
             ], true);
             // Rate limiting is retried at most once, and only when the
             // server told us how long to wait. Guessing is what turns a
